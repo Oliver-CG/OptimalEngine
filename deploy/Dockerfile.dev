@@ -1,0 +1,29 @@
+# Dev/test image — mirrors upstream CI (.github/workflows/ci.yml: OTP 26.2 /
+# Elixir 1.17.3 + libsnappy-dev) so `mix test` here means what CI means.
+# Usage, from the repo root:
+#   docker build -f deploy/Dockerfile.dev -t oe-dev deploy
+#   docker run --rm -v "$PWD":/app -v oe-mix-deps:/app/deps \
+#     -v oe-mix-build:/app/_build oe-dev sh -c "mix deps.get && mix test"
+# The named volumes cache deps/_build between runs; the bind mount means the
+# container always tests the working tree, never a copy.
+FROM hexpm/elixir:1.17.3-erlang-26.2.5-debian-bookworm-20260610-slim
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        libsqlite3-dev \
+        libsnappy-dev \
+        python3 \
+        jq \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mix local.hex --force && mix local.rebar --force
+
+WORKDIR /app
+ENV MIX_ENV=test \
+    HEX_HTTP_CONCURRENCY=8 \
+    HEX_HTTP_TIMEOUT=120
+
+CMD ["mix", "test"]
