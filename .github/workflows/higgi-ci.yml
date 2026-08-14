@@ -15,6 +15,9 @@ concurrency:
   group: higgi-ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test
@@ -125,3 +128,34 @@ jobs:
             exit 1
           fi
           echo "toets faalde zoals verwacht tegen de open engine"
+
+  # The box only ever pulls a finished image — building there transits ~3GB
+  # on a volume that sits at 80%. Public repo → public package → no PAT on
+  # the box.
+  publish:
+    name: publish (ghcr)
+    needs: promote-toets
+    if: github.ref == 'refs/heads/higgi/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build release image
+        run: |
+          docker build -f deploy/Dockerfile.engine.poc \
+            -t "ghcr.io/oliver-cg/optimalengine-engine:${{ github.sha }}" \
+            -t "ghcr.io/oliver-cg/optimalengine-engine:latest" .
+
+      - name: Push
+        run: |
+          docker push "ghcr.io/oliver-cg/optimalengine-engine:${{ github.sha }}"
+          docker push "ghcr.io/oliver-cg/optimalengine-engine:latest"
