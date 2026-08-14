@@ -400,7 +400,7 @@ defmodule OptimalEngine.API.Router do
 
     opts = [
       workspace_id: body["workspace"],
-      actor_id: body["actor_id"] || "user:roberto",
+      actor_id: request_actor(conn),
       reason: body["reason"] || "reviewed identity merge"
     ]
 
@@ -435,7 +435,7 @@ defmodule OptimalEngine.API.Router do
     else
       opts = [
         workspace_id: body["workspace"],
-        actor_id: body["actor_id"] || "user:roberto",
+        actor_id: request_actor(conn),
         entity_id: body["entity_id"],
         confidence: body["confidence"] || 1.0,
         reason: body["reason"]
@@ -686,7 +686,7 @@ defmodule OptimalEngine.API.Router do
 
     case OptimalEngine.Storage.PolicyStore.put_policy(workspace_id, use_cases,
            provider_overrides: Map.get(body, "provider_overrides", %{}),
-           actor_id: conn.assigns[:current_principal_id]
+           actor_id: request_actor(conn)
          ) do
       {:ok, policy} -> json(conn, policy)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -710,7 +710,7 @@ defmodule OptimalEngine.API.Router do
     attrs = %{
       workspace_id: workspace_id,
       device_id: Map.get(body, "device_id"),
-      actor_id: conn.assigns[:current_principal_id],
+      actor_id: request_actor(conn),
       entity_type: Map.get(body, "entity_type"),
       entity_id: Map.get(body, "entity_id"),
       operation: Map.get(body, "operation"),
@@ -1786,7 +1786,7 @@ defmodule OptimalEngine.API.Router do
         |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
         |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
         |> maybe_put(:metadata, Map.get(body, "metadata"))
-        |> maybe_put(:actor_id, Map.get(body, "actor_id"))
+        |> maybe_put(:actor_id, authenticated_actor(conn))
         |> maybe_put(:access_policy_id, Map.get(body, "access_policy_id"))
         |> maybe_put(:security_labels, string_list_param(body, "security_labels"))
         |> maybe_put(:partition_ids, string_list_param(body, "partition_ids"))
@@ -2039,7 +2039,7 @@ defmodule OptimalEngine.API.Router do
         Map.get(body, "tenant_id", conn.assigns[:current_tenant] || "default")
       )
 
-    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+    actor_id = request_actor(conn)
 
     opts =
       [
@@ -2127,7 +2127,7 @@ defmodule OptimalEngine.API.Router do
         [
           tenant_id: Map.get(body, "tenant", Map.get(body, "tenant_id", "default")),
           workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default")),
-          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          actor_id: request_actor(conn),
           active_memory_pool_id: id,
           request_intent: Map.get(body, "request_intent", "recall"),
           time_mode: Map.get(body, "time_mode", "current_valid"),
@@ -2161,7 +2161,7 @@ defmodule OptimalEngine.API.Router do
 
     opts =
       [
-        actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+        actor_id: request_actor(conn),
         continue_on_error: parse_bool(Map.get(body, "continue_on_error"), true)
       ]
       |> maybe_put_string_list(body, "allowed_partitions", :allowed_partitions)
@@ -2198,7 +2198,7 @@ defmodule OptimalEngine.API.Router do
     else
       opts =
         [
-          actor_id: Map.get(body, "actor_id", conn.assigns[:current_principal]),
+          actor_id: request_actor(conn),
           source_type: Map.get(body, "source_type", "pool_observation"),
           observation_kind: Map.get(body, "observation_kind", "observation"),
           claim_text: Map.get(body, "claim_text", observation),
@@ -2335,7 +2335,7 @@ defmodule OptimalEngine.API.Router do
     body = conn.body_params || %{}
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
     tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
-    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+    actor_id = request_actor(conn)
 
     case MemoryCore.reject_claim(id,
            workspace_id: workspace_id,
@@ -2359,14 +2359,20 @@ defmodule OptimalEngine.API.Router do
     body = conn.body_params || %{}
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
     tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
-    actor_id = Map.get(body, "actor_id", conn.assigns[:current_principal])
+
+    # Promotion is an approval: the verifier is the AUTHENTICATED principal,
+    # never a body-asserted name and never an anonymous placeholder — a present
+    # string counts as human approval in ScoringPolicy. Without a principal
+    # both fields stay nil and promotion falls through to the :auto policy,
+    # where the confidence threshold decides.
+    actor_id = authenticated_actor(conn)
 
     opts =
       [
         workspace_id: workspace_id,
         tenant_id: tenant_id,
         actor_id: actor_id,
-        verifier_id: Map.get(body, "verifier_id"),
+        verifier_id: actor_id,
         fact_text: Map.get(body, "fact_text"),
         fact_type: Map.get(body, "fact_type"),
         verification_status: Map.get(body, "verification_status"),
@@ -2397,6 +2403,18 @@ defmodule OptimalEngine.API.Router do
 
       {:error, :not_found} ->
         send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+
+      {:error, :approval_required} ->
+        send_resp(conn, 403, Jason.encode!(%{error: "approval_required"}))
+
+      {:error, :self_review_not_allowed} ->
+        send_resp(conn, 403, Jason.encode!(%{error: "self_review_not_allowed"}))
+
+      {:error, :below_auto_promote_threshold} ->
+        send_resp(conn, 403, Jason.encode!(%{error: "below_auto_promote_threshold"}))
+
+      {:error, :claim_already_promoted} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim_already_promoted"}))
 
       {:error, :claim_rejected} ->
         send_resp(conn, 409, Jason.encode!(%{error: "claim rejected"}))
@@ -2713,7 +2731,7 @@ defmodule OptimalEngine.API.Router do
     else
       workspace_id = Map.get(body, "workspace", "default")
 
-      opts = governed_retrieval_opts(body, workspace_id, :hybrid)
+      opts = governed_retrieval_opts(conn, body, workspace_id, :hybrid)
 
       case OptimalEngine.MemoryCore.retrieve(query, opts) do
         {:ok, package} ->
@@ -2751,7 +2769,7 @@ defmodule OptimalEngine.API.Router do
       send_resp(conn, 400, Jason.encode!(%{error: "query is required"}))
     else
       workspace = Map.get(body, "workspace", "default")
-      opts = governed_retrieval_opts(body, workspace, :reconstructive)
+      opts = governed_retrieval_opts(conn, body, workspace, :reconstructive)
 
       case OptimalEngine.MemoryCore.retrieve(query, opts) do
         {:ok, result} -> json(conn, OptimalEngine.MemoryCore.ContextPackage.to_map(result))
@@ -2768,7 +2786,7 @@ defmodule OptimalEngine.API.Router do
       OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
         tenant_id: Map.get(body, "tenant_id", "default"),
         workspace_id: Map.get(body, "workspace", "default"),
-        actor_id: Map.get(body, "actor_id", "user:roberto"),
+        actor_id: request_actor(conn),
         permissions: Map.get(body, "permissions", [])
       })
 
@@ -2792,7 +2810,7 @@ defmodule OptimalEngine.API.Router do
       OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
         tenant_id: Map.get(body, "tenant_id", "default"),
         workspace_id: Map.get(body, "workspace", "default"),
-        actor_id: Map.get(body, "actor_id", "user:roberto")
+        actor_id: request_actor(conn)
       })
 
     case OptimalEngine.MemoryCore.ReconstructionLearning.propose_consolidation(scope,
@@ -2810,7 +2828,7 @@ defmodule OptimalEngine.API.Router do
       OptimalEngine.MemoryCore.ScopeEnvelope.resolve(%{
         tenant_id: Map.get(body, "tenant_id", "default"),
         workspace_id: Map.get(body, "workspace", "default"),
-        actor_id: Map.get(body, "actor_id", "user:roberto")
+        actor_id: request_actor(conn)
       })
 
     case OptimalEngine.MemoryCore.AssociativeProjection.rebuild(scope) do
@@ -2843,7 +2861,7 @@ defmodule OptimalEngine.API.Router do
         OptimalEngine.ReconstructionEvaluation.run(cases,
           workspace_id: Map.get(body, "workspace", "default:miosa"),
           tenant_id: Map.get(body, "tenant_id", "default"),
-          actor_id: Map.get(body, "actor_id", "user:roberto")
+          actor_id: request_actor(conn)
         )
 
       json(conn, result)
@@ -2899,10 +2917,13 @@ defmodule OptimalEngine.API.Router do
     decision = parse_review_decision(body["decision"])
 
     if decision in [:accept, :reject] and is_list(body["ids"]) and body["ids"] != [] do
+      # decide_claims(:accept) promotes — approval identity must be the bare
+      # authenticated principal (nil falls through to the :auto threshold),
+      # never the anonymous placeholder request_actor/2 would supply.
       case OptimalEngine.DataSteward.decide_claims(body["ids"], decision,
              workspace_id: body["workspace"] || "default:miosa",
              tenant_id: body["tenant_id"] || "default",
-             actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+             actor_id: authenticated_actor(conn)
            ) do
         {:ok, result} -> json(conn, result)
       end
@@ -2917,7 +2938,7 @@ defmodule OptimalEngine.API.Router do
 
     if decision in [:accept, :reject] and is_list(body["items"]) and body["items"] != [] do
       case OptimalEngine.DataSteward.decide_routes(body["items"], decision,
-             actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+             actor_id: request_actor(conn)
            ) do
         {:ok, result} -> json(conn, result)
       end
@@ -2931,7 +2952,7 @@ defmodule OptimalEngine.API.Router do
 
     case OptimalEngine.DataSteward.recheck(body["workspace"] || "default:miosa",
            tenant_id: body["tenant_id"] || "default",
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           actor_id: request_actor(conn)
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2944,7 +2965,7 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.DataSteward.repair_orphan_scope(
            body["source_workspace_id"],
            body["target_workspace_id"],
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           actor_id: request_actor(conn)
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2957,7 +2978,7 @@ defmodule OptimalEngine.API.Router do
     case OptimalEngine.DataSteward.rename_workspace(
            body["source_workspace_id"],
            body["target_workspace_id"],
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           actor_id: request_actor(conn)
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2965,10 +2986,8 @@ defmodule OptimalEngine.API.Router do
   end
 
   post "/api/data-steward/nodes/repair-types" do
-    body = conn.body_params || %{}
-
     case OptimalEngine.DataSteward.repair_node_types(
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           actor_id: request_actor(conn)
          ) do
       {:ok, result} -> json(conn, %{updated_nodes: result})
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2976,10 +2995,8 @@ defmodule OptimalEngine.API.Router do
   end
 
   post "/api/data-steward/hierarchy/repair-deterministic" do
-    body = conn.body_params || %{}
-
     case OptimalEngine.DataSteward.repair_deterministic_hierarchy(
-           actor_id: body["actor_id"] || conn.assigns[:current_principal] || "user:roberto"
+           actor_id: request_actor(conn)
          ) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
@@ -2998,11 +3015,11 @@ defmodule OptimalEngine.API.Router do
   defp parse_review_decision("reject"), do: :reject
   defp parse_review_decision(_), do: :invalid
 
-  defp governed_retrieval_opts(body, workspace_id, strategy) do
+  defp governed_retrieval_opts(conn, body, workspace_id, strategy) do
     [
       tenant_id: Map.get(body, "tenant_id", "default"),
       workspace_id: workspace_id,
-      actor_id: Map.get(body, "actor_id", "user:roberto"),
+      actor_id: request_actor(conn),
       permissions: Map.get(body, "permissions", []),
       allowed_partitions: Map.get(body, "allowed_partitions", []),
       allowed_security_labels: Map.get(body, "allowed_security_labels", []),
@@ -3248,7 +3265,7 @@ defmodule OptimalEngine.API.Router do
   defp handle_asset_upload(conn, body, source_path) do
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
     tenant_id = Map.get(body, "tenant", Map.get(body, "tenant_id", "default"))
-    actor_id = Map.get(body, "actor_id", "api:asset-upload")
+    actor_id = request_actor(conn, "api:asset-upload")
 
     store_opts =
       [
@@ -3462,6 +3479,16 @@ defmodule OptimalEngine.API.Router do
       principal when is_binary(principal) and principal != "" -> principal
       _ -> nil
     end
+  end
+
+  # Provenance identity for ledger/audit fields: the authenticated principal,
+  # else an honest route-scoped system name. The request body must never name
+  # the actor — a body-asserted name writes someone else's identity into
+  # provenance. NOT for approval paths (promote, claims/decide): there a
+  # present string counts as human sign-off, so those use authenticated_actor/1
+  # directly and let nil fall through to the :auto confidence policy.
+  defp request_actor(conn, fallback \\ "api:anonymous") do
+    authenticated_actor(conn) || fallback
   end
 
   # Server-side ACL grants for governed recall, read from the verified API

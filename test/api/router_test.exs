@@ -22,6 +22,33 @@ defmodule OptimalEngine.API.RouterTest do
     Router.call(conn, @opts)
   end
 
+  # Promotion identity comes exclusively from the authenticated principal, so
+  # API tests that promote need a real principal + key instead of a body name.
+  defp reviewer_token(principal_id) do
+    {:ok, _} =
+      OptimalEngine.Identity.Principal.upsert(%{
+        id: principal_id,
+        kind: :user,
+        display_name: principal_id
+      })
+
+    {:ok, %{key: token}} =
+      OptimalEngine.Auth.ApiKey.mint(%{
+        tenant_id: "default",
+        name: "router-test #{principal_id}",
+        principal_id: principal_id
+      })
+
+    token
+  end
+
+  defp authed_request(method, path, body, token) do
+    conn(method, path, Jason.encode!(body))
+    |> put_req_header("content-type", "application/json")
+    |> put_req_header("x-api-key", token)
+    |> Router.call(@opts)
+  end
+
   defp extracted_policy_claim(workspace_id, opts) do
     source =
       OptimalEngine.MemoryCore.source_package_from_text(Keyword.fetch!(opts, :claim_text),
@@ -355,13 +382,17 @@ defmodule OptimalEngine.API.RouterTest do
       assert get_body["id"] == claim["id"]
 
       promote_conn =
-        request(:post, "/api/memory-core/claims/#{claim["id"]}/promote", %{
-          "workspace" => workspace_id,
-          "actor_id" => "user:api-reviewer",
-          "fact_text" => "Accepted #{content}",
-          "summary" => "Remember #{content}",
-          "memory_type" => "reviewed_api_note"
-        })
+        authed_request(
+          :post,
+          "/api/memory-core/claims/#{claim["id"]}/promote",
+          %{
+            "workspace" => workspace_id,
+            "fact_text" => "Accepted #{content}",
+            "summary" => "Remember #{content}",
+            "memory_type" => "reviewed_api_note"
+          },
+          reviewer_token("user:api-reviewer")
+        )
 
       assert promote_conn.status == 200
       assert {:ok, promote_body} = Jason.decode(promote_conn.resp_body)
@@ -465,12 +496,18 @@ defmodule OptimalEngine.API.RouterTest do
                  object_anchor: "launch"
                )
 
+      token = reviewer_token("user:api-reviewer")
+
       original_conn =
-        request(:post, "/api/memory-core/claims/#{original_claim.id}/promote", %{
-          "workspace" => workspace_id,
-          "actor_id" => "user:api-reviewer",
-          "fact_text" => "The customer onboarding date is June 10."
-        })
+        authed_request(
+          :post,
+          "/api/memory-core/claims/#{original_claim.id}/promote",
+          %{
+            "workspace" => workspace_id,
+            "fact_text" => "The customer onboarding date is June 10."
+          },
+          token
+        )
 
       assert original_conn.status == 200
       assert {:ok, %{"fact" => %{"id" => original_fact_id}}} = Jason.decode(original_conn.resp_body)
@@ -484,11 +521,15 @@ defmodule OptimalEngine.API.RouterTest do
                )
 
       conflict_conn =
-        request(:post, "/api/memory-core/claims/#{replacement_claim.id}/promote", %{
-          "workspace" => workspace_id,
-          "actor_id" => "user:api-reviewer",
-          "fact_text" => "The customer onboarding date is June 17."
-        })
+        authed_request(
+          :post,
+          "/api/memory-core/claims/#{replacement_claim.id}/promote",
+          %{
+            "workspace" => workspace_id,
+            "fact_text" => "The customer onboarding date is June 17."
+          },
+          token
+        )
 
       assert conflict_conn.status == 409
 
@@ -497,13 +538,17 @@ defmodule OptimalEngine.API.RouterTest do
                Jason.decode(conflict_conn.resp_body)
 
       supersede_conn =
-        request(:post, "/api/memory-core/claims/#{replacement_claim.id}/promote", %{
-          "workspace" => workspace_id,
-          "actor_id" => "user:api-reviewer",
-          "fact_text" => "The customer onboarding date is June 17.",
-          "supersedes_fact_id" => original_fact_id,
-          "supersession_reason" => "new source evidence"
-        })
+        authed_request(
+          :post,
+          "/api/memory-core/claims/#{replacement_claim.id}/promote",
+          %{
+            "workspace" => workspace_id,
+            "fact_text" => "The customer onboarding date is June 17.",
+            "supersedes_fact_id" => original_fact_id,
+            "supersession_reason" => "new source evidence"
+          },
+          token
+        )
 
       assert supersede_conn.status == 200
 
@@ -896,6 +941,96 @@ defmodule OptimalEngine.API.RouterTest do
     test "is present on GET /v1/status" do
       conn = request(:get, "/v1/status")
       assert get_resp_header(conn, "x-api-version") == ["v1"]
+    end
+  end
+
+  # The POC measured a confidence-0.55 claim promoted to a "verified" fact by
+  # an anonymous caller. Identity now comes exclusively from the authenticated
+  # principal: the body cannot name an actor or verifier.
+  defp promote_request(claim, ws, body, headers \\ []) do
+    conn =
+      conn(
+        :post,
+        "/api/memory-core/claims/#{claim.id}/promote",
+        Jason.encode!(Map.put(body, "workspace", ws))
+      )
+      |> put_req_header("content-type", "application/json")
+
+    conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
+    Router.call(conn, @opts)
+  end
+
+  defp low_confidence_claim(ws) do
+    {:ok, claim} =
+      extracted_policy_claim(ws,
+        claim_text: "De keukenproductiviteit was 71 euro per uur.",
+        aggregate_confidence: 0.55,
+        evaluator_id: "user:invoerder"
+      )
+
+    claim
+  end
+
+  describe "promotion identity (actor sweep regression)" do
+    test "anonymous promotion is refused regardless of body-asserted identity" do
+      ws = "promote-ident-#{System.unique_integer([:positive])}"
+      claim = low_confidence_claim(ws)
+
+      conn =
+        promote_request(claim, ws, %{
+          "actor_id" => "user:aanvaller",
+          "verifier_id" => "user:aanvaller"
+        })
+
+      assert conn.status == 403
+      assert {:ok, %{"error" => "approval_required"}} = Jason.decode(conn.resp_body)
+
+      assert {:ok, unchanged} =
+               OptimalEngine.MemoryCore.get_claim(claim.id,
+                 workspace_id: ws,
+                 tenant_id: "default"
+               )
+
+      assert unchanged.lifecycle_state == "pending"
+      assert unchanged.review_status == "unreviewed"
+    end
+
+    test "an authenticated key promotes as its own principal, never as the body's name" do
+      ws = "promote-ident-#{System.unique_integer([:positive])}"
+      claim = low_confidence_claim(ws)
+
+      token = reviewer_token("user:keurmeester")
+
+      conn =
+        promote_request(
+          claim,
+          ws,
+          %{"actor_id" => "user:aanvaller", "verifier_id" => "user:aanvaller"},
+          [{"x-api-key", token}]
+        )
+
+      assert conn.status == 200
+      assert {:ok, %{"fact" => fact}} = Jason.decode(conn.resp_body)
+      assert fact["verifier_id"] == "user:keurmeester"
+    end
+
+    test "a key whose principal fed the claim in cannot approve it" do
+      ws = "promote-ident-#{System.unique_integer([:positive])}"
+      claim = low_confidence_claim(ws)
+
+      token = reviewer_token("user:invoerder")
+
+      conn = promote_request(claim, ws, %{}, [{"x-api-key", token}])
+
+      assert conn.status == 403
+      assert {:ok, %{"error" => "self_review_not_allowed"}} = Jason.decode(conn.resp_body)
+    end
+
+    test "the router carries no hardcoded personal identity and no body-asserted actors" do
+      source = File.read!("lib/optimal_engine/api/router.ex")
+      refute source =~ "user:roberto"
+      refute source =~ ~s|body["actor_id"]|
+      refute source =~ ~s|Map.get(body, "actor_id"|
     end
   end
 end
