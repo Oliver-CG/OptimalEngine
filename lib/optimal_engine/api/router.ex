@@ -1705,36 +1705,59 @@ defmodule OptimalEngine.API.Router do
   # POST /api/memory — create a new memory entry.
   # Body: {content, workspace?, is_static?, audience?, citation_uri?, source_chunk_id?, metadata?}
   # Returns: 201 + memory struct.
+  # Caller metadata rides through to the pending claim (governed_memory_metadata
+  # merges it, the ClaimExtractor stamps it on the claim — downstream cockpits
+  # key on metadata.feit_concept), so the field must be bounded and loud:
+  # normalize_metadata/1 silently swallows non-maps, and an unbounded map is an
+  # unbounded row. Engine keys still win after the merge.
+  @caller_metadata_max_bytes 16_384
+
+  defp caller_metadata_error(nil), do: nil
+
+  defp caller_metadata_error(metadata) when is_map(metadata) do
+    if byte_size(Jason.encode!(metadata)) > @caller_metadata_max_bytes do
+      "metadata too large (max #{@caller_metadata_max_bytes} bytes encoded)"
+    end
+  end
+
+  defp caller_metadata_error(_), do: "metadata must be a JSON object"
+
   post "/api/memory" do
     body = conn.body_params || %{}
     content = Map.get(body, "content")
+    metadata_error = caller_metadata_error(Map.get(body, "metadata"))
 
-    if not (is_binary(content) and content != "") do
-      send_resp(conn, 400, Jason.encode!(%{error: "content is required"}))
-    else
-      workspace_id = Map.get(body, "workspace", "default")
+    cond do
+      not (is_binary(content) and content != "") ->
+        send_resp(conn, 400, Jason.encode!(%{error: "content is required"}))
 
-      attrs =
-        %{
-          content: content,
-          workspace_id: workspace_id,
-          tenant_id: Map.get(body, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
-        }
-        |> maybe_put(:is_static, Map.get(body, "is_static"))
-        |> maybe_put(:audience, Map.get(body, "audience"))
-        |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
-        |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
-        |> maybe_put(:metadata, Map.get(body, "metadata"))
+      metadata_error ->
+        send_resp(conn, 400, Jason.encode!(%{error: metadata_error}))
 
-      case OptimalEngine.Memory.create(attrs) do
-        {:ok, mem} ->
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(201, Jason.encode!(memory_to_map(mem)))
+      true ->
+        workspace_id = Map.get(body, "workspace", "default")
 
-        {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-      end
+        attrs =
+          %{
+            content: content,
+            workspace_id: workspace_id,
+            tenant_id: Map.get(body, "tenant", OptimalEngine.Tenancy.Tenant.default_id())
+          }
+          |> maybe_put(:is_static, Map.get(body, "is_static"))
+          |> maybe_put(:audience, Map.get(body, "audience"))
+          |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
+          |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
+          |> maybe_put(:metadata, Map.get(body, "metadata"))
+
+        case OptimalEngine.Memory.create(attrs) do
+          {:ok, mem} ->
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(201, Jason.encode!(memory_to_map(mem)))
+
+          {:error, reason} ->
+            send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        end
     end
   end
 
@@ -1771,44 +1794,50 @@ defmodule OptimalEngine.API.Router do
   post "/api/memory/remember" do
     body = conn.body_params || %{}
     content = Map.get(body, "content")
+    metadata_error = caller_metadata_error(Map.get(body, "metadata"))
 
-    if not (is_binary(content) and content != "") do
-      send_resp(conn, 400, Jason.encode!(%{error: "content is required"}))
-    else
-      attrs =
-        %{
-          content: content,
-          workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
-        }
-        |> maybe_put(:tenant_id, Map.get(body, "tenant", Map.get(body, "tenant_id")))
-        |> maybe_put(:is_static, Map.get(body, "is_static"))
-        |> maybe_put(:audience, Map.get(body, "audience"))
-        |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
-        |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
-        |> maybe_put(:metadata, Map.get(body, "metadata"))
-        |> maybe_put(:actor_id, authenticated_actor(conn))
-        |> maybe_put(:access_policy_id, Map.get(body, "access_policy_id"))
-        |> maybe_put(:security_labels, string_list_param(body, "security_labels"))
-        |> maybe_put(:partition_ids, string_list_param(body, "partition_ids"))
+    cond do
+      not (is_binary(content) and content != "") ->
+        send_resp(conn, 400, Jason.encode!(%{error: "content is required"}))
 
-      opts =
-        [
-          force: parse_bool(Map.get(body, "force"), false),
-          gate_threshold: parse_float(Map.get(body, "gate_threshold")),
-          salience_floor: parse_float(Map.get(body, "salience_floor")),
-          skip_threshold: parse_float(Map.get(body, "skip_threshold")),
-          update_threshold: parse_float(Map.get(body, "update_threshold")),
-          versioned_projection: true
-        ]
-        |> reject_nil_keyword()
+      metadata_error ->
+        send_resp(conn, 400, Jason.encode!(%{error: metadata_error}))
 
-      case OptimalEngine.Memory.remember(attrs, opts) do
-        {:ok, result} ->
-          json(conn, memory_intake_result_to_map(result))
+      true ->
+        attrs =
+          %{
+            content: content,
+            workspace_id: Map.get(body, "workspace", Map.get(body, "workspace_id", "default"))
+          }
+          |> maybe_put(:tenant_id, Map.get(body, "tenant", Map.get(body, "tenant_id")))
+          |> maybe_put(:is_static, Map.get(body, "is_static"))
+          |> maybe_put(:audience, Map.get(body, "audience"))
+          |> maybe_put(:citation_uri, Map.get(body, "citation_uri"))
+          |> maybe_put(:source_chunk_id, Map.get(body, "source_chunk_id"))
+          |> maybe_put(:metadata, Map.get(body, "metadata"))
+          |> maybe_put(:actor_id, authenticated_actor(conn))
+          |> maybe_put(:access_policy_id, Map.get(body, "access_policy_id"))
+          |> maybe_put(:security_labels, string_list_param(body, "security_labels"))
+          |> maybe_put(:partition_ids, string_list_param(body, "partition_ids"))
 
-        {:error, reason} ->
-          send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
-      end
+        opts =
+          [
+            force: parse_bool(Map.get(body, "force"), false),
+            gate_threshold: parse_float(Map.get(body, "gate_threshold")),
+            salience_floor: parse_float(Map.get(body, "salience_floor")),
+            skip_threshold: parse_float(Map.get(body, "skip_threshold")),
+            update_threshold: parse_float(Map.get(body, "update_threshold")),
+            versioned_projection: true
+          ]
+          |> reject_nil_keyword()
+
+        case OptimalEngine.Memory.remember(attrs, opts) do
+          {:ok, result} ->
+            json(conn, memory_intake_result_to_map(result))
+
+          {:error, reason} ->
+            send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+        end
     end
   end
 
