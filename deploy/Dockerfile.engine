@@ -70,6 +70,11 @@ COPY --from=builder --chown=optimal:optimal /app/_build/prod/rel/optimal ./
 # /data is the single persistent volume:
 #   /data/.optimal/     — SQLite DB + cache
 #   /data/<workspaces>/ — Markdown signal files
+# Created and chowned BEFORE the VOLUME declaration: a fresh named volume
+# inherits the image path's ownership, and without this line that is root:root
+# while the runtime user is optimal (1000) — the engine then dies on boot with
+# :eacces at mkdir /data/.optimal. Measured on first clean deploy, 2026-08-14.
+RUN mkdir -p /data && chown optimal:optimal /data
 VOLUME ["/data"]
 
 USER optimal
