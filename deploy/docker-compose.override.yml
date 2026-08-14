@@ -1,0 +1,21 @@
+---
+# POC-override, HiggiHQ 14-08-2026.
+#  1. De basis-compose bindt 4200 op 0.0.0.0 mét OPTIMAL_AUTH_REQUIRED=false.
+#     Op een box die n8n en Caddy voor echte klanten draait is dat een open
+#     deur — exact de faalklasse van FounderOS issue #2. Localhost-only.
+#  2. Dockerfile.engine.poc: libsnappy-dev + `git init` in /app (rebar3-hook
+#     van :rocksdb roept git aan; .git komt de buildcontext nooit in).
+#  3. LANG/ELIXIR_ERL_OPTIONS: de VM start met latin1 name-encoding en
+#     waarschuwt zelf dat Elixir daardoor kan misgaan. Ons corpus is
+#     Nederlands, dus dat is hier geen theoretisch risico.
+services:
+  engine:
+    build:
+      dockerfile: deploy/Dockerfile.engine.poc
+    environment:
+      OPTIMAL_AUTH_REQUIRED: "true"
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      ELIXIR_ERL_OPTIONS: "+fnu"
+    ports: !override
+      - "127.0.0.1:4200:4200"
