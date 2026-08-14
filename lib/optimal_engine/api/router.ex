@@ -2416,6 +2416,9 @@ defmodule OptimalEngine.API.Router do
       {:error, :claim_already_promoted} ->
         send_resp(conn, 409, Jason.encode!(%{error: "claim_already_promoted"}))
 
+      {:error, :claim_already_reviewed} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim_already_reviewed"}))
+
       {:error, :claim_rejected} ->
         send_resp(conn, 409, Jason.encode!(%{error: "claim rejected"}))
 
@@ -3011,18 +3014,14 @@ defmodule OptimalEngine.API.Router do
   end
 
   post "/api/data-steward/nodes/repair-types" do
-    case OptimalEngine.DataSteward.repair_node_types(
-           actor_id: request_actor(conn)
-         ) do
+    case OptimalEngine.DataSteward.repair_node_types(actor_id: request_actor(conn)) do
       {:ok, result} -> json(conn, %{updated_nodes: result})
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
   post "/api/data-steward/hierarchy/repair-deterministic" do
-    case OptimalEngine.DataSteward.repair_deterministic_hierarchy(
-           actor_id: request_actor(conn)
-         ) do
+    case OptimalEngine.DataSteward.repair_deterministic_hierarchy(actor_id: request_actor(conn)) do
       {:ok, result} -> json(conn, result)
       {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end

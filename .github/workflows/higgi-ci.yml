@@ -1,0 +1,127 @@
+# Fork CI for the higgi/* line: the upstream test suite PLUS the
+# promote-toets v2 governance gate. The gate runs against a live engine with
+# auth enabled, then proves it CAN fail by re-running against an open engine.
+# No untrusted event input is interpolated anywhere in this file.
+name: higgi-ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["higgi/**", "upstream/**"]
+  pull_request:
+    branches: ["higgi/main"]
+
+concurrency:
+  group: higgi-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "26.2"
+          elixir-version: "1.17.3"
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev
+
+      - name: Cache deps and _build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-higgi-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-higgi-
+
+      - run: mix deps.get
+      - run: mix compile
+      - run: mix format --check-formatted
+      - name: Run tests
+        run: mix test
+        env:
+          MIX_ENV: test
+
+  promote-toets:
+    name: promote-toets
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          otp-version: "26.2"
+          elixir-version: "1.17.3"
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libsnappy-dev
+
+      - name: Cache deps and _build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-higgi-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-higgi-
+
+      - run: mix deps.get
+      - run: mix compile
+
+      # The keys land in the same SQLite file the engine will serve; minting
+      # happens before boot so the two mix invocations never contend.
+      # File-then-tail instead of a pipe: app-shutdown log lines can land on
+      # stdout after the JSON and a pipe's tail -1 races them.
+      - name: Mint toets keys
+        run: |
+          mix run test/acceptance/mint_toets_keys.exs > /tmp/mint-out.txt
+          grep -E '^\{' /tmp/mint-out.txt | tail -1 > /tmp/toets-keys.json
+          jq -e .admin /tmp/toets-keys.json >/dev/null
+
+      - name: Start engine with auth enabled
+        run: |
+          OPTIMAL_API_ENABLED=true OPTIMAL_AUTH_REQUIRED=true mix run --no-halt &
+          echo $! > /tmp/engine.pid
+          for _ in $(seq 1 90); do
+            curl -fsS http://127.0.0.1:4200/api/health >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "engine kwam niet op" >&2
+          exit 1
+
+      - name: Promote-toets v2 (must pass)
+        run: |
+          export OE_KEY_ADMIN="$(jq -r .admin /tmp/toets-keys.json)"
+          export OE_KEY_SERVICE="$(jq -r .service /tmp/toets-keys.json)"
+          export OE_KEY_REVIEWER="$(jq -r .reviewer /tmp/toets-keys.json)"
+          export OE_KEY_BRIDGE="$(jq -r .bridge /tmp/toets-keys.json)"
+          bash test/acceptance/promote_toets_v2.sh
+
+      # A gate that cannot fail is not a gate: rerun against an OPEN engine
+      # and demand a red result (A0 must trip).
+      - name: Negative control — the toets must fail against an open engine
+        run: |
+          kill "$(cat /tmp/engine.pid)" 2>/dev/null || true
+          sleep 2
+          OPTIMAL_API_ENABLED=true OPTIMAL_AUTH_REQUIRED=false mix run --no-halt &
+          for _ in $(seq 1 90); do
+            curl -fsS http://127.0.0.1:4200/api/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          export OE_KEY_ADMIN="$(jq -r .admin /tmp/toets-keys.json)"
+          export OE_KEY_SERVICE="$(jq -r .service /tmp/toets-keys.json)"
+          export OE_KEY_REVIEWER="$(jq -r .reviewer /tmp/toets-keys.json)"
+          export OE_KEY_BRIDGE="$(jq -r .bridge /tmp/toets-keys.json)"
+          if bash test/acceptance/promote_toets_v2.sh; then
+            echo "::error::de toets slaagde tegen een open engine — de poort kan niet falen"
+            exit 1
+          fi
+          echo "toets faalde zoals verwacht tegen de open engine"

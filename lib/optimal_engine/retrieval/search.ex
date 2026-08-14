@@ -239,7 +239,9 @@ defmodule OptimalEngine.Retrieval.Search do
 
     lexical_hits =
       case fts_query do
-        :none -> []
+        :none ->
+          []
+
         _ ->
           case Store.raw_query(sql, [fts_query, workspace_id, tenant_id, limit]) do
             {:ok, rows} -> Enum.map(rows, &memory_context(&1, workspace_id, query))
