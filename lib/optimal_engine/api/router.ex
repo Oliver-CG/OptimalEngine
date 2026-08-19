@@ -2359,21 +2359,41 @@ defmodule OptimalEngine.API.Router do
   end
 
   # POST /api/memory-core/claims/:id/reject — reject a pending claim.
-  # Body: {workspace?, tenant?, actor_id?}
+  # Body: {workspace?, tenant?, reason?}
+  # Rejection is a review, same rule as promote: the reviewer is the
+  # AUTHENTICATED principal, never a body-asserted name and never the
+  # "api:anonymous" placeholder — an anonymous rejection is a decision with
+  # no record of who made it. Without a principal the engine answers 403.
   post "/api/memory-core/claims/:id/reject" do
     body = conn.body_params || %{}
     workspace_id = Map.get(body, "workspace", Map.get(body, "workspace_id"))
     tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
-    actor_id = request_actor(conn)
+    actor_id = authenticated_actor(conn)
 
     case MemoryCore.reject_claim(id,
            workspace_id: workspace_id,
            tenant_id: tenant_id,
-           actor_id: actor_id
+           actor_id: actor_id,
+           verifier_id: actor_id,
+           reason: Map.get(body, "reason")
          ) do
-      {:ok, claim} -> json(conn, %{claim: claim_to_map(claim)})
-      {:error, :not_found} -> send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
-      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+      {:ok, claim} ->
+        json(conn, %{claim: claim_to_map(claim)})
+
+      {:error, :not_found} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+
+      {:error, :reviewer_required} ->
+        send_resp(conn, 403, Jason.encode!(%{error: "reviewer_required"}))
+
+      {:error, :claim_already_promoted} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim_already_promoted"}))
+
+      {:error, :claim_already_reviewed} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim_already_reviewed"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
@@ -2474,6 +2494,50 @@ defmodule OptimalEngine.API.Router do
           409,
           Jason.encode!(%{error: "superseded fact is not current", fact_id: fact_id})
         )
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # GET /api/memory-core/facts — the promoted knowledge, readable.
+  # Params: workspace, tenant?, lifecycle_state?, subject_anchor?,
+  #         action_class?, current_only?, offset?, limit?
+  # Until this route the brain was write-only over HTTP: claims could be
+  # placed and promoted, but the resulting facts were invisible outside the
+  # promote response itself. This is the smallest honest window — the stored
+  # rows, paginated, no derived judgement; staleness/contradiction reading is
+  # the caller's job from the fields (stale_after, contradiction_status,
+  # lifecycle_state, transaction_time_end).
+  get "/api/memory-core/facts" do
+    workspace_id = query_param(conn, "workspace", "default")
+    {offset, limit} = Pagination.parse(conn)
+
+    opts =
+      [
+        tenant_id: query_param(conn, "tenant", nil),
+        lifecycle_state: query_param(conn, "lifecycle_state", nil),
+        subject_anchor: query_param(conn, "subject_anchor", nil),
+        action_class: query_param(conn, "action_class", nil)
+      ]
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Keyword.put(
+        :open_transaction_only,
+        truthy?(query_param(conn, "current_only", nil)) == true
+      )
+
+    case MemoryCore.list_facts(workspace_id, opts) do
+      {:ok, facts} ->
+        total = length(facts)
+        page = facts |> Enum.drop(offset) |> Enum.take(limit)
+        envelope = Pagination.wrap(Enum.map(page, &stringify_keys/1), total, offset, limit)
+
+        json(conn, %{
+          workspace_id: workspace_id,
+          count: total,
+          facts: envelope.data,
+          pagination: envelope.pagination
+        })
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))

@@ -115,3 +115,32 @@ end
 if auth_env = System.get_env("OPTIMAL_AUTH_REQUIRED") do
   config :optimal_engine, :auth, auth_required: auth_env == "true"
 end
+
+# Claim promotion mode as an env var, same wiring rationale as auth above:
+# config/ is baked into the release image, so a mode switch must not require
+# a rebuild — with this block it is a container recreate (`up -d`). Values:
+# "manual" (a human reviews every claim), "agent_review", "auto_threshold".
+# Unknown values fall back to the compiled default, loudly.
+if mode_env = System.get_env("OPTIMAL_CLAIM_PROMOTION_MODE") do
+  mode =
+    case mode_env do
+      "manual" ->
+        :manual
+
+      "agent_review" ->
+        :agent_review
+
+      "auto_threshold" ->
+        :auto_threshold
+
+      other ->
+        IO.puts(
+          :stderr,
+          "OPTIMAL_CLAIM_PROMOTION_MODE=#{inspect(other)} is not a mode; using auto_threshold"
+        )
+
+        :auto_threshold
+    end
+
+  config :optimal_engine, :memory, claim_promotion_mode: mode
+end

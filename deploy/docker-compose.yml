@@ -31,6 +31,7 @@ services:
       OPTIMAL_API_PORT:        "4200"
       OPTIMAL_API_INTERFACE:   "0.0.0.0"
       OPTIMAL_AUTH_REQUIRED:   "${OPTIMAL_AUTH_REQUIRED:-false}"
+      OPTIMAL_CLAIM_PROMOTION_MODE: "${OPTIMAL_CLAIM_PROMOTION_MODE:-auto_threshold}"
       OLLAMA_HOST:             "${OPTIMAL_OLLAMA_URL:-http://host.docker.internal:11434}"
       # MIX_ENV is already baked into the release; listed here for clarity
       MIX_ENV:                 prod

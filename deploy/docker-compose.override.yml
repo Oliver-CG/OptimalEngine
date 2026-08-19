@@ -8,12 +8,16 @@
 #  3. LANG/ELIXIR_ERL_OPTIONS: de VM start met latin1 name-encoding en
 #     waarschuwt zelf dat Elixir daardoor kan misgaan. Ons corpus is
 #     Nederlands, dus dat is hier geen theoretisch risico.
+#  4. OPTIMAL_CLAIM_PROMOTION_MODE=manual (19-08, B83/B120): een mens keurt
+#     álle claims — de PromotionScheduler wordt een no-op. De auto-drempel
+#     (0.85) was hier het enige vangnet; "manual" maakt de belofte hard.
 services:
   engine:
     build:
       dockerfile: deploy/Dockerfile.engine.poc
     environment:
       OPTIMAL_AUTH_REQUIRED: "true"
+      OPTIMAL_CLAIM_PROMOTION_MODE: "manual"
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
       ELIXIR_ERL_OPTIONS: "+fnu"

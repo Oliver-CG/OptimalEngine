@@ -17,6 +17,7 @@ defmodule OptimalEngine.MemoryCore do
     MemoryObject,
     RetrievalCoordinator,
     SourcePackage,
+    Store,
     ToolModelGovernance,
     WorkflowSkill
   }
@@ -62,6 +63,7 @@ defmodule OptimalEngine.MemoryCore do
   defdelegate get_claim(claim_id, opts \\ []), to: ClaimReview, as: :get
   defdelegate reject_claim(claim_id, opts \\ []), to: ClaimReview, as: :reject
   defdelegate promote_claim(claim_id, opts \\ []), to: ClaimReview, as: :promote
+  defdelegate list_facts(workspace_id, opts \\ []), to: Store
 
   def promote_claim_to_fact(claim, opts \\ []) do
     opts =

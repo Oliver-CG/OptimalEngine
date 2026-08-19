@@ -68,15 +68,20 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     workspace_id = Keyword.get(opts, :workspace_id)
     tenant_id = Keyword.get(opts, :tenant_id, "default")
 
+    # Rejection is a review decision and goes through the governed path:
+    # FactPromoter.reject/2 demands a reviewer and writes the
+    # memory_core.reject_claim ledger entry. The old direct
+    # Store.update_claim_review call silently dropped :actor_id — a rejection
+    # then existed with no record of who made it, asymmetric with promote.
     with {:ok, claim} <-
            Store.get_claim(claim_id, tenant_id: tenant_id, workspace_id: workspace_id),
-         :ok <-
-           Store.update_claim_review(claim_id,
+         {:ok, _rejected} <-
+           FactPromoter.reject(claim,
              tenant_id: tenant_id,
              workspace_id: workspace_id || claim.workspace_id,
-             review_status: "rejected",
-             lifecycle_state: "rejected",
-             actor_id: Keyword.get(opts, :actor_id)
+             actor_id: Keyword.get(opts, :actor_id),
+             verifier_id: Keyword.get(opts, :verifier_id),
+             reason: Keyword.get(opts, :reason)
            ) do
       Store.get_claim(claim_id,
         tenant_id: tenant_id,
@@ -95,7 +100,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
            Store.get_claim(claim_id, tenant_id: tenant_id, workspace_id: workspace_id),
          :ok <- ensure_promotable(claim),
          {:ok, policy} <- promotion_policy(claim, opts),
-         {:ok, fact} <- FactPromoter.promote(claim, fact_opts(opts, policy)),
+         {:ok, fact} <- FactPromoter.promote(claim, fact_opts(claim, opts, policy)),
          :ok <- invalidate_explicit_supersession(claim, opts),
          {:ok, memory} <- MemoryObject.build_from_fact(fact, memory_opts(opts)),
          :ok <- apply_promotion_policy(policy, fact, opts),
@@ -245,7 +250,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     end
   end
 
-  defp fact_opts(opts, policy) do
+  defp fact_opts(claim, opts, policy) do
     [
       actor_id: Keyword.get(opts, :actor_id),
       verifier_id: Keyword.get(opts, :verifier_id) || Keyword.get(opts, :actor_id),
@@ -262,7 +267,7 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
           nil -> nil
           fact -> [fact.id]
         end,
-      metadata: promotion_metadata(opts, policy)
+      metadata: promotion_metadata(claim, opts, policy)
     ]
     |> compact_nil()
   end
@@ -282,10 +287,17 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     Enum.reject(opts, fn {_key, value} -> is_nil(value) end)
   end
 
-  defp promotion_metadata(opts, policy) do
+  # The claim's caller metadata travels onto the fact: the placer gave the
+  # claim its meaning (category, source) and promotion is a judgement about
+  # the content, not a reason to lose that meaning. Explicit :fact_metadata
+  # from the reviewer wins over the claim's copy; the promotion_policy record
+  # wins over both.
+  defp promotion_metadata(claim, opts, policy) do
     superseded_fact = Map.get(policy, :superseded_fact)
 
-    Keyword.get(opts, :fact_metadata, %{})
+    claim
+    |> claim_metadata()
+    |> Map.merge(Keyword.get(opts, :fact_metadata, %{}))
     |> Map.merge(%{
       promotion_policy: %{
         stale_checked: Map.get(policy, :stale_checked, false),
@@ -293,6 +305,13 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
         supersedes_fact_id: if(superseded_fact, do: superseded_fact.id)
       }
     })
+  end
+
+  defp claim_metadata(claim) do
+    case Map.get(claim, :metadata) || Map.get(claim, "metadata") do
+      metadata when is_map(metadata) -> metadata
+      _ -> %{}
+    end
   end
 
   defp normalize_text(value) when is_binary(value) do
