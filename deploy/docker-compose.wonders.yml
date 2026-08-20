@@ -1,0 +1,39 @@
+# Wonder's-instantie (20-08-2026, B131) — eigen container, volume en poort;
+# zelfde image als de RH-instantie zodat een codewissel maar één build kost.
+# Per-klant-scheiding is fysiek: project-naam scheidt het volume, de poort
+# scheidt het verkeer, de sleutels worden in déze container gemint
+# (OE_INSTANCE=wonders) en werken nergens anders.
+# Start:  docker compose -f deploy/docker-compose.wonders.yml up -d
+name: optimal-engine-wonders
+
+services:
+  engine:
+    image: optimal-engine-engine:latest
+    ports:
+      - "127.0.0.1:4210:4200"
+    volumes:
+      - optimal_data_wonders:/data
+    environment:
+      OPTIMAL_ENGINE_ROOT: /data
+      OPTIMAL_ENGINE_DB: /data/.optimal/index.db
+      OPTIMAL_ENGINE_CACHE: /data/.optimal/cache
+      OPTIMAL_API_ENABLED: "true"
+      OPTIMAL_API_PORT: "4200"
+      OPTIMAL_API_INTERFACE: "0.0.0.0"
+      OPTIMAL_AUTH_REQUIRED: "true"
+      OPTIMAL_CLAIM_PROMOTION_MODE: "manual"
+      OLLAMA_HOST: "http://host.docker.internal:11434"
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      ELIXIR_ERL_OPTIONS: "+fnu"
+      MIX_ENV: prod
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4200/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  optimal_data_wonders:
