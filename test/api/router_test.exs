@@ -418,11 +418,24 @@ defmodule OptimalEngine.API.RouterTest do
       list_conn = request(:get, "/api/memory-core/claims?workspace=#{workspace_id}")
       assert {:ok, %{"claims" => [claim]}} = Jason.decode(list_conn.resp_body)
 
-      reject_conn =
+      # A rejection is a review decision: the reviewer is the authenticated
+      # principal, never a body-asserted name. An anonymous reject is refused.
+      anonymous_reject =
         request(:post, "/api/memory-core/claims/#{claim["id"]}/reject", %{
           "workspace" => workspace_id,
           "actor_id" => "user:api-reviewer"
         })
+
+      assert anonymous_reject.status == 403
+      assert {:ok, %{"error" => "reviewer_required"}} = Jason.decode(anonymous_reject.resp_body)
+
+      reject_conn =
+        authed_request(
+          :post,
+          "/api/memory-core/claims/#{claim["id"]}/reject",
+          %{"workspace" => workspace_id},
+          reviewer_token("user:api-reviewer")
+        )
 
       assert reject_conn.status == 200
       assert {:ok, reject_body} = Jason.decode(reject_conn.resp_body)
@@ -455,10 +468,12 @@ defmodule OptimalEngine.API.RouterTest do
       assert {:ok, %{"claims" => [claim_a, claim_b]}} = Jason.decode(list_conn.resp_body)
 
       reject_conn =
-        request(:post, "/api/memory-core/claims/#{claim_b["id"]}/reject", %{
-          "workspace" => workspace_id,
-          "actor_id" => "user:api-reviewer"
-        })
+        authed_request(
+          :post,
+          "/api/memory-core/claims/#{claim_b["id"]}/reject",
+          %{"workspace" => workspace_id},
+          reviewer_token("user:api-reviewer")
+        )
 
       assert reject_conn.status == 200
 
