@@ -20,8 +20,11 @@ defmodule OptimalEngine.API.FactRevisionTest do
   defp request(method, path, body \\ nil) do
     conn =
       case body do
-        nil -> conn(method, path)
-        b -> conn(method, path, Jason.encode!(b)) |> put_req_header("content-type", "application/json")
+        nil ->
+          conn(method, path)
+
+        b ->
+          conn(method, path, Jason.encode!(b)) |> put_req_header("content-type", "application/json")
       end
 
     Router.call(conn, @opts)
@@ -45,7 +48,9 @@ defmodule OptimalEngine.API.FactRevisionTest do
     {:ok, %{"claims" => [claim]}} = Jason.decode(list_conn.resp_body)
 
     promote_conn =
-      conn(:post, "/api/memory-core/claims/#{claim["id"]}/promote",
+      conn(
+        :post,
+        "/api/memory-core/claims/#{claim["id"]}/promote",
         Jason.encode!(%{
           "workspace" => workspace_id,
           "fact_text" => "Geaccepteerd #{content}"
@@ -81,7 +86,9 @@ defmodule OptimalEngine.API.FactRevisionTest do
       {fact, token} = current_fact(workspace)
 
       patch_conn =
-        conn(:patch, "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
+        conn(
+          :patch,
+          "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
           Jason.encode!(%{
             "fact_text" => "Hooikamer avondgarantie is 850 euro",
             "reason" => "Nikki correctie 21-09",
@@ -122,9 +129,7 @@ defmodule OptimalEngine.API.FactRevisionTest do
 
     test "404 on unknown fact" do
       conn =
-        request(:patch, "/api/memory-core/facts/fact_bestaatniet?workspace=ws",
-          %{fact_text: "x"}
-        )
+        request(:patch, "/api/memory-core/facts/fact_bestaatniet?workspace=ws", %{fact_text: "x"})
 
       assert conn.status == 404
     end
@@ -142,7 +147,9 @@ defmodule OptimalEngine.API.FactRevisionTest do
       assert empty.status == 400
 
       blank =
-        conn(:patch, "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
+        conn(
+          :patch,
+          "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
           Jason.encode!(%{fact_text: "   "})
         )
         |> put_req_header("content-type", "application/json")
@@ -157,7 +164,9 @@ defmodule OptimalEngine.API.FactRevisionTest do
       {fact, token} = current_fact(workspace)
 
       first =
-        conn(:patch, "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
+        conn(
+          :patch,
+          "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
           Jason.encode!(%{fact_text: "eerste revisie"})
         )
         |> put_req_header("content-type", "application/json")
@@ -167,7 +176,9 @@ defmodule OptimalEngine.API.FactRevisionTest do
       assert first.status == 200
 
       second =
-        conn(:patch, "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
+        conn(
+          :patch,
+          "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
           Jason.encode!(%{fact_text: "tweede revisie op oud feit"})
         )
         |> put_req_header("content-type", "application/json")

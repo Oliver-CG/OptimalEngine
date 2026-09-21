@@ -47,7 +47,7 @@ defmodule OptimalEngine.MemoryCore.FactReviser do
         {:error, :fact_superseded}
 
       not Enum.any?(@editable, &Map.has_key?(changes, &1)) and
-          not Map.has_key?(changes, :metadata) and
+        not Map.has_key?(changes, :metadata) and
           not Map.has_key?(changes, :verification_status) ->
         {:error, :no_changes}
 
