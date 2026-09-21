@@ -28,6 +28,8 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Insight.Health, as: HealthDiagnostics
   alias OptimalEngine.Graph.Reflector, as: Reflector
   alias OptimalEngine.MemoryCore.ContextPackage
+  alias OptimalEngine.MemoryCore.FactReviser
+  alias OptimalEngine.MemoryCore.Store, as: FactStore
   alias OptimalEngine.Profile
   alias OptimalEngine.MemoryCore
   alias OptimalEngine.Retrieval
@@ -2544,6 +2546,87 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # PATCH /api/memory-core/facts/:id — revise a fact, bitemporally.
+  #
+  # Body: {fact_text?, subject_anchor?, action_class?, object_anchor?,
+  #        scope?, stale_after?, metadata?, verification_status?, reason?, actor_id?}
+  #
+  # Until this route the brain's facts were write-once: claims could be
+  # promoted and facts read, but a correction from the shop (Nikki editing a
+  # wrong Hooikamer amount in the UI) silently vanished — there was no update
+  # endpoint at all, so the shell's save button saved into nothing.
+  #
+  # The route does NOT mutate the old row's text. It closes the old row
+  # (lifecycle "superseded", transaction_time_end set, superseded_by link) and
+  # inserts a new current version, carrying over lineage, evidence links and
+  # scores unchanged; a "supersedes" relationship edge plus a derivation
+  # ledger entry record who revised what and why. History stays readable;
+  # `current_only` callers see exactly one version.
+  #
+  # verification_status defaults to "reviewed" on revision — a human touched
+  # this fact deliberately, which is exactly what the 0.55 "unreviewed"
+  # confidence baseline (ScoringPolicy) means to distinguish. The 0.65
+  # reviewed / 0.75 verified confidence bump is a scoring-policy change and
+  # stays out of this route until that policy work is done deliberately.
+  patch "/api/memory-core/facts/:fact_id" do
+    workspace_id = query_param(conn, "workspace", "default")
+    body = conn.body_params || %{}
+    changes = Map.drop(body, ["reason", "actor_id"])
+
+    # The actor is the authenticated principal (AuthPlug), never a body-asserted
+    # name — same rule as promote/reject; the router-wide actor-sweep test
+    # enforces it.
+    opts = [actor_id: authenticated_actor(conn) || "api"]
+
+    opts =
+      case Map.get(body, "reason") do
+        reason when is_binary(reason) and reason != "" -> Keyword.put(opts, :reason, reason)
+        _ -> opts
+      end
+
+    cond do
+      changes == %{} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "no editable fields in body"}))
+
+      not valid_text?(Map.get(changes, "fact_text")) ->
+        send_resp(conn, 400, Jason.encode!(%{error: "fact_text must be a non-empty string"}))
+
+      true ->
+        case FactStore.get_fact(workspace_id, fact_id) do
+          {:error, :not_found} ->
+            send_resp(conn, 404, Jason.encode!(%{error: "not_found", fact_id: fact_id}))
+
+          {:ok, fact} ->
+            case FactReviser.revise(fact, stringify_atom_changes(changes), opts) do
+              {:ok, %{old: old, new: new_fact}} ->
+                json(conn, %{
+                  workspace_id: workspace_id,
+                  old_fact: %{
+                    id: old.id,
+                    lifecycle_state: "superseded",
+                    superseded_by: new_fact.id
+                  },
+                  fact: stringify_keys(new_fact)
+                })
+
+              {:error, :fact_superseded} ->
+                send_resp(
+                  conn,
+                  409,
+                  Jason.encode!(%{
+                    error: "fact is already superseded; revise its current version instead",
+                    fact_id: fact_id,
+                    superseded_by: Map.get(fact, :superseded_by)
+                  })
+                )
+
+              {:error, reason} ->
+                send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+            end
+        end
+    end
+  end
+
   # ── API key management (Phase 18) ──────────────────────────────────────────
   #
   # These endpoints manage API keys for the current tenant. When auth is on
@@ -3326,6 +3409,18 @@ defmodule OptimalEngine.API.Router do
   defp truthy?("1"), do: true
   defp truthy?(1), do: true
   defp truthy?(_value), do: nil
+
+  # PATCH facts/:id helpers — see the route comment above.
+  defp valid_text?(nil), do: true
+  defp valid_text?(text) when is_binary(text), do: String.trim(text) != ""
+  defp valid_text?(_), do: false
+
+  # Body params arrive with string keys; FactReviser matches on atoms.
+  defp stringify_atom_changes(changes) do
+    Map.new(changes, fn
+      {key, value} when is_binary(key) -> {String.to_existing_atom(key), value}
+    end)
+  end
 
   defp asset_upload_source_path(body) do
     path = Map.get(body, "path")
