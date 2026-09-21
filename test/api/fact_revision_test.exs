@@ -127,6 +127,50 @@ defmodule OptimalEngine.API.FactRevisionTest do
       assert old["fact_text"] == fact["fact_text"]
     end
 
+    test "verifies a fact in place: no new row, status rises, id stays" do
+      workspace = "verify-#{System.unique_integer([:positive])}"
+      {fact, token} = current_fact(workspace)
+
+      verify_conn =
+        conn(
+          :patch,
+          "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
+          Jason.encode!(%{verification_status: "verified"})
+        )
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("x-api-key", token)
+        |> Router.call(@opts)
+
+      assert verify_conn.status == 200
+      {:ok, body} = Jason.decode(verify_conn.resp_body)
+      assert body["verified_in_place"] == true
+      # Het id blijft: geen supersedes-rondje voor een Klopt-bevestiging.
+      assert body["fact"]["id"] == fact["id"]
+      assert body["fact"]["verification_status"] == "verified"
+
+      # Zelfde aantal feiten: er is géén nieuwe rij bijgekomen.
+      all_conn = request(:get, "/api/memory-core/facts?workspace=#{workspace}")
+      {:ok, all_body} = Jason.decode(all_conn.resp_body)
+      assert all_body["count"] == 1
+    end
+
+    test "400 on a bad verification_status" do
+      workspace = "verify-bad-#{System.unique_integer([:positive])}"
+      {fact, token} = current_fact(workspace)
+
+      conn =
+        conn(
+          :patch,
+          "/api/memory-core/facts/#{fact["id"]}?workspace=#{workspace}",
+          Jason.encode!(%{verification_status: "superduper"})
+        )
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("x-api-key", token)
+        |> Router.call(@opts)
+
+      assert conn.status == 400
+    end
+
     test "404 on unknown fact" do
       conn =
         request(:patch, "/api/memory-core/facts/fact_bestaatniet?workspace=ws", %{fact_text: "x"})

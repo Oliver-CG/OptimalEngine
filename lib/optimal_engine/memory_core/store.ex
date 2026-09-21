@@ -1014,6 +1014,44 @@ defmodule OptimalEngine.MemoryCore.Store do
     ])
   end
 
+  @doc """
+  Verify a current fact in place: verification_status + verification_time on
+  the existing row. NO supersession round-trip — a Klopt-confirmation from the
+  shop changes the trust of the fact, not its content, so writing a new row
+  (with a new id) would break every evidence link and bevestiging that points
+  at the current id. The fact_text and lineage stay untouched.
+
+  Only current facts (transaction_time_end IS NULL, not superseded) can be
+  verified; anything else is {:error, :fact_not_current} so the caller can
+  tell the shell why (409, same contract as the PATCH reviseroute).
+  """
+  @spec verify_fact(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, :not_found | :fact_not_current | term()}
+  def verify_fact(workspace_id, fact_id, status)
+      when is_binary(workspace_id) and is_binary(fact_id) and is_binary(status) do
+    with {:ok, %Fact{} = fact} <- get_fact(workspace_id, fact_id) do
+      if Map.get(fact, :lifecycle_state) == "superseded" or
+           not is_nil(Map.get(fact, :transaction_time_end)) do
+        {:error, :fact_not_current}
+      else
+        now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+        sql = """
+        UPDATE facts
+        SET verification_status = ?3,
+            verification_time = ?4,
+            updated_at = datetime('now')
+        WHERE workspace_id = ?1 AND id = ?2
+        """
+
+        with :ok <- Store.raw_execute(sql, [workspace_id, fact_id, status, now]) do
+          # Teruglezen: het bewijs is de rij, niet de respons.
+          get_fact(workspace_id, fact_id)
+        end
+      end
+    end
+  end
+
   @spec get_memory_object(String.t(), String.t(), keyword()) ::
           {:ok, MemoryObject.t()} | {:error, term()}
   def get_memory_object(workspace_id, memory_object_id, opts \\ [])

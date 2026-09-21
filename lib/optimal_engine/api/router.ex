@@ -2588,6 +2588,49 @@ defmodule OptimalEngine.API.Router do
       changes == %{} ->
         send_resp(conn, 400, Jason.encode!(%{error: "no editable fields in body"}))
 
+      # Verificatie-only (21-09, de Klopt-knop): géén supersedes-rondje, de
+      # bestaande rij krijgt status + tijd. Zie Store.verify_fact.
+      Map.has_key?(changes, "verification_status") and
+          not Map.has_key?(changes, "fact_text") ->
+        status = Map.get(changes, "verification_status")
+
+        cond do
+          status not in ["reviewed", "verified", "quarantined"] ->
+            send_resp(
+              conn,
+              400,
+              Jason.encode!(%{
+                error: "verification_status must be reviewed, verified or quarantined"
+              })
+            )
+
+          true ->
+            case FactStore.verify_fact(workspace_id, fact_id, status) do
+              {:ok, fact} ->
+                json(conn, %{
+                  workspace_id: workspace_id,
+                  fact: stringify_keys(fact),
+                  verified_in_place: true
+                })
+
+              {:error, :not_found} ->
+                send_resp(conn, 404, Jason.encode!(%{error: "not_found", fact_id: fact_id}))
+
+              {:error, :fact_not_current} ->
+                send_resp(
+                  conn,
+                  409,
+                  Jason.encode!(%{
+                    error: "fact is superseded; verify its current version instead",
+                    fact_id: fact_id
+                  })
+                )
+
+              {:error, reason} ->
+                send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
+            end
+        end
+
       not valid_text?(Map.get(changes, "fact_text")) ->
         send_resp(conn, 400, Jason.encode!(%{error: "fact_text must be a non-empty string"}))
 
