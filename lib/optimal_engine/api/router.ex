@@ -553,13 +553,7 @@ defmodule OptimalEngine.API.Router do
       _ ->
         report = Health.ready(skip: [:embedder])
 
-        json(conn, %{
-          status: Health.status(),
-          live: Health.live?(),
-          ok?: report.ok?,
-          degraded: report.degraded,
-          checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
-        })
+        send_json(conn, health_body(report))
     end
   end
 
@@ -3289,9 +3283,27 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
-  defp json(conn, data) do
-    body = Jason.encode!(data)
+  @doc """
+  Encodes the `/api/health` body for a readiness report.
 
+  Public on purpose: the container HEALTHCHECK greps this exact string
+  (`"ok?":true`) and `test/ops/health_test.exs` holds the pattern read from the
+  Dockerfiles against the body this function produces. Renaming a key here goes
+  red there instead of quietly making the healthcheck unfalsifiable again.
+  """
+  def health_body(report) do
+    Jason.encode!(%{
+      status: Health.status(),
+      live: Health.live?(),
+      ok?: report.ok?,
+      degraded: report.degraded,
+      checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
+    })
+  end
+
+  defp json(conn, data), do: send_json(conn, Jason.encode!(data))
+
+  defp send_json(conn, body) when is_binary(body) do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(conn.status || 200, body)

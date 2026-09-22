@@ -40,26 +40,18 @@ defmodule OptimalEngine.Ops.HealthcheckStringTest do
   "de poort staat open".
 
   Deze toets bindt de letterlijke string uit de Dockerfile aan wat de route
-  encodeert: hij leest het grep-patroon uít de Dockerfiles en houdt het tegen
-  een gezond en een geplant ziek rapport.
+  encodeert: hij leest het grep-patroon uít de Dockerfiles en roept de échte
+  encoder aan (`Router.health_body/1`, wat "/api/health" verstuurt) met een
+  gezond en een geplant ziek rapport. Een nagebouwde kopie zou groen blijven
+  als de route hernoemd werd.
   """
   use ExUnit.Case, async: true
 
+  alias OptimalEngine.API.Router
   alias OptimalEngine.Health
 
   # Beide worden gebouwd: .poc is wat higgi-ci naar ghcr duwt.
   @dockerfiles ["deploy/Dockerfile.engine", "deploy/Dockerfile.engine.poc"]
-
-  # Zoals lib/optimal_engine/api/router.ex "/api/health" het antwoord bouwt.
-  defp health_body(report) do
-    Jason.encode!(%{
-      status: :degraded,
-      live: true,
-      ok?: report.ok?,
-      degraded: report.degraded,
-      checks: Map.new(report.checks, fn {k, v} -> {k, inspect(v)} end)
-    })
-  end
 
   defp grep_patroon(pad) do
     line =
@@ -92,8 +84,8 @@ defmodule OptimalEngine.Ops.HealthcheckStringTest do
     for pad <- @dockerfiles do
       patroon = grep_patroon(pad)
 
-      assert health_body(gezond) =~ patroon
-      refute health_body(ziek) =~ patroon
+      assert Router.health_body(gezond) =~ patroon
+      refute Router.health_body(ziek) =~ patroon
     end
   end
 
