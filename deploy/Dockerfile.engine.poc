@@ -102,6 +102,6 @@ ENV OPTIMAL_ENGINE_ROOT=/data \
     RELEASE_COOKIE=optimal_engine_docker
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -qO- "http://localhost:4200/api/health" || exit 1
+    CMD wget -qO- "http://localhost:4200/api/health" | grep -q '"ok?":true' || exit 1
 
 CMD ["/app/bin/optimal", "start"]
