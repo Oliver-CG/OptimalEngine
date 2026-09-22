@@ -1016,10 +1016,19 @@ defmodule OptimalEngine.MemoryCore.Store do
 
   @doc """
   Verify a current fact in place: verification_status + verification_time on
-  the existing row. NO supersession round-trip — a Klopt-confirmation from the
-  shop changes the trust of the fact, not its content, so writing a new row
-  (with a new id) would break every evidence link and bevestiging that points
-  at the current id. The fact_text and lineage stay untouched.
+  the existing row, and aggregate_confidence rises to the policy value for
+  that status (verified 0.75, reviewed 0.65 — ScoringPolicy's @trust_confidence
+  table). NO supersession round-trip — a Klopt-confirmation from the shop
+  changes the trust of the fact, not its content, so writing a new row (with a
+  new id) would break every evidence link and bevestiging that points at the
+  current id. The fact_text and lineage stay untouched.
+
+  Why confidence moves here (21-09, Oliver's complaint): the shell shows
+  aggregate_confidence as "the percentage", so a status-only change was
+  invisible. The policy already equates verified with 0.75; recording only
+  one of the two re-created the two-sources-one-fact drift this route
+  exists to close. Confidence only ever rises here, never falls: a
+  quarantined fact keeps its old score and carries its status.
 
   Only current facts (transaction_time_end IS NULL, not superseded) can be
   verified; anything else is {:error, :fact_not_current} so the caller can
@@ -1036,15 +1045,23 @@ defmodule OptimalEngine.MemoryCore.Store do
       else
         now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
+        new_confidence =
+          case status do
+            "verified" -> max(Map.get(fact, :aggregate_confidence) || 0.55, 0.75)
+            "reviewed" -> max(Map.get(fact, :aggregate_confidence) || 0.55, 0.65)
+            _ -> Map.get(fact, :aggregate_confidence)
+          end
+
         sql = """
         UPDATE facts
         SET verification_status = ?3,
             verification_time = ?4,
+            aggregate_confidence = ?5,
             updated_at = datetime('now')
         WHERE workspace_id = ?1 AND id = ?2
         """
 
-        with :ok <- Store.raw_execute(sql, [workspace_id, fact_id, status, now]) do
+        with :ok <- Store.raw_execute(sql, [workspace_id, fact_id, status, now, new_confidence]) do
           # Teruglezen: het bewijs is de rij, niet de respons.
           get_fact(workspace_id, fact_id)
         end

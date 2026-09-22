@@ -147,6 +147,10 @@ defmodule OptimalEngine.API.FactRevisionTest do
       # Het id blijft: geen supersedes-rondje voor een Klopt-bevestiging.
       assert body["fact"]["id"] == fact["id"]
       assert body["fact"]["verification_status"] == "verified"
+      # En de confidence stijgt naar de policy-waarde (0.75): de schil toont
+      # dit getal als "het percentage", dus zonder deze stijging was een
+      # Klopt-klik onzichtbaar (Oliver, 21-09).
+      assert body["fact"]["aggregate_confidence"] == 0.75
 
       # Zelfde aantal feiten: er is géén nieuwe rij bijgekomen.
       all_conn = request(:get, "/api/memory-core/facts?workspace=#{workspace}")
