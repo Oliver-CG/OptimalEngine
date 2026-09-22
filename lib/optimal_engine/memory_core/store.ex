@@ -895,6 +895,36 @@ defmodule OptimalEngine.MemoryCore.Store do
     update_claim_review(workspace_id, claim_id, lifecycle_state, review_status)
   end
 
+  @doc """
+  Conditionally takes a promoted Claim back out of the brain.
+
+  `update_claim_review/5` only ever matches `lifecycle_state = 'pending'`, so
+  it cannot express this transition: retraction starts from `'promoted'`. The
+  UPDATE re-checks that state, so two racing retractions produce exactly one
+  and the loser gets `{:error, :claim_not_promoted}` instead of silently
+  succeeding — the same rule the review transition already follows.
+
+  Pass the opaque handle from `OptimalEngine.Store.transaction/2` as `txn` so
+  the claim row, the facts it produced and the ledger entry land together.
+  """
+  @spec retract_claim(String.t(), String.t(), term()) ::
+          :ok | {:error, :claim_not_promoted} | {:error, term()}
+  def retract_claim(workspace_id, claim_id, txn)
+      when is_binary(workspace_id) and is_binary(claim_id) do
+    sql = """
+    UPDATE claims
+    SET lifecycle_state = 'retracted', review_status = 'retracted',
+        updated_at = datetime('now')
+    WHERE workspace_id = ?1 AND id = ?2 AND lifecycle_state = 'promoted'
+    """
+
+    case Store.txn_execute(txn, sql, [workspace_id, claim_id]) do
+      {:ok, 0} -> {:error, :claim_not_promoted}
+      {:ok, _changes} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
   @spec get_fact(String.t(), String.t(), keyword()) :: {:ok, Fact.t()} | {:error, term()}
   def get_fact(workspace_id, fact_id, opts \\ [])
       when is_binary(workspace_id) and is_binary(fact_id) do

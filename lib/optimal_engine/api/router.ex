@@ -2393,6 +2393,59 @@ defmodule OptimalEngine.API.Router do
     end
   end
 
+  # POST /api/memory-core/claims/:id/retract — trek een GEPROMOVEERDE claim in.
+  # Body: {reason (verplicht), workspace?, tenant?}
+  #
+  # `reject` dekt alleen een claim die nog op keuring wacht: op een
+  # gepromoveerde claim antwoordt hij 409 claim_already_promoted, en tot deze
+  # route was er dan geen weg terug — een feit dat niet klopte bleef in het
+  # brein staan en reisde mee in elke agentbeurt. Hier gaat de claim naar
+  # "retracted" en wordt het feit dat eruit voortkwam gesloten; de rij blijft
+  # leesbaar, met reden en keurder in zijn metadata.
+  #
+  # Wie intrekt is de GEAUTHENTICEERDE principal, nooit een naam uit de body
+  # (zelfde regel als promote en reject; de actor-sweep bewaakt hem). Waarom is
+  # verplicht: een feit dat zonder reden verdwijnt is over een maand niet meer
+  # terug te halen door iemand die er niet bij was, en dan is het geen
+  # intrekking maar kennisverlies.
+  post "/api/memory-core/claims/:id/retract" do
+    body = conn.body_params || %{}
+    tenant_id = Map.get(body, "tenant", conn.assigns[:current_tenant] || "default")
+    actor_id = authenticated_actor(conn)
+
+    workspace_id =
+      case Map.get(body, "workspace") || Map.get(body, "workspace_id") do
+        workspace when is_binary(workspace) and workspace != "" -> workspace
+        _ -> "default"
+      end
+
+    case MemoryCore.retract_claim(id,
+           workspace_id: workspace_id,
+           tenant_id: tenant_id,
+           actor_id: actor_id,
+           verifier_id: actor_id,
+           reason: Map.get(body, "reason")
+         ) do
+      {:ok, %{claim: claim, fact_ids: fact_ids}} ->
+        json(conn, %{claim: claim_to_map(claim), retracted_fact_ids: fact_ids})
+
+      {:error, reason} when reason in [:not_found, :claim_not_found] ->
+        send_resp(conn, 404, Jason.encode!(%{error: "claim not found"}))
+
+      {:error, :reason_required} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "reason_required"}))
+
+      {:error, :reviewer_required} ->
+        send_resp(conn, 403, Jason.encode!(%{error: "reviewer_required"}))
+
+      {:error, :claim_not_promoted} ->
+        send_resp(conn, 409, Jason.encode!(%{error: "claim_not_promoted"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
   # POST /api/memory-core/claims/:id/promote — accept a claim as a Fact and
   # build a Memory Object.
   # Body: {workspace?, tenant?, actor_id?, fact_text?, summary?, memory_type?,

@@ -90,6 +90,39 @@ defmodule OptimalEngine.MemoryCore.ClaimReview do
     end
   end
 
+  @doc """
+  Trek een GEPROMOVEERDE claim in: de claim gaat naar "retracted" en het feit
+  dat eruit voortkwam wordt gesloten. `reject/2` dekt dit niet — die antwoordt
+  op een gepromoveerde claim `:claim_already_promoted`, en dan was er geen weg
+  terug. Zie `FactPromoter.retract/2` voor wat er precies dichtgaat en wat er
+  leesbaar blijft.
+  """
+  @spec retract(String.t(), keyword()) ::
+          {:ok, %{claim: map(), fact_ids: [String.t()]}} | {:error, term()}
+  def retract(claim_id, opts \\ []) when is_binary(claim_id) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+    tenant_id = Keyword.get(opts, :tenant_id, "default")
+
+    with {:ok, claim} <-
+           Store.get_claim(claim_id, tenant_id: tenant_id, workspace_id: workspace_id),
+         {:ok, %{fact_ids: fact_ids}} <-
+           FactPromoter.retract(claim,
+             tenant_id: tenant_id,
+             workspace_id: workspace_id || claim.workspace_id,
+             actor_id: Keyword.get(opts, :actor_id),
+             verifier_id: Keyword.get(opts, :verifier_id),
+             reason: Keyword.get(opts, :reason)
+           ),
+         # Teruglezen: het bewijs is de rij, niet wat wij dachten te schrijven.
+         {:ok, retracted} <-
+           Store.get_claim(claim_id,
+             tenant_id: tenant_id,
+             workspace_id: workspace_id || claim.workspace_id
+           ) do
+      {:ok, %{claim: retracted, fact_ids: fact_ids}}
+    end
+  end
+
   @spec promote(String.t(), keyword()) ::
           {:ok, %{claim: map(), fact: map(), memory_object: map()}} | {:error, term()}
   def promote(claim_id, opts \\ []) when is_binary(claim_id) do

@@ -114,6 +114,52 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
 
   def reject(claim, opts) when is_map(claim), do: reject(Claim.new(claim), opts)
 
+  @doc """
+  Retract a Claim that was already promoted — the decision itself is taken
+  back.
+
+  `reject/2` is for a Claim still in review; on a promoted one it answers
+  `{:error, :claim_already_promoted}`, and until this function there was no
+  way back at all: a Fact that turned out to be wrong kept standing in the
+  brain and kept travelling into every agent turn. Retraction closes that
+  hole without deleting anything:
+
+    * the Claim row goes to `lifecycle_state: "retracted"` /
+      `review_status: "retracted"`;
+    * every CURRENT Fact that carries this Claim in `accepted_claim_ids` is
+      closed — `lifecycle_state: "retracted"`, `transaction_time_end` set,
+      and the reason plus the retracting principal in `metadata.retraction`.
+      A reader that asks for open transaction times (the `current_only`
+      parameter on `GET /api/memory-core/facts`) stops seeing it; the row
+      itself stays readable, exactly like a superseded version;
+    * the Memory Objects built on those Facts get
+      `supersession_status: "retracted"`, which is what retrieval filters on
+      (`supersession_status = 'none'`), so RAG stops serving them too.
+
+  Requires `:verifier_id` or `:actor_id` (`{:error, :reviewer_required}`) and
+  a non-empty `:reason` (`{:error, :reason_required}`): a fact that leaves
+  the brain without a recorded why is knowledge loss, not a retraction. A
+  Claim that was never promoted is `{:error, :claim_not_promoted}`.
+  """
+  @spec retract(Claim.t() | map() | String.t(), keyword()) ::
+          {:ok, %{claim: Claim.t(), fact_ids: [String.t()]}} | {:error, term()}
+  def retract(claim_or_id, opts \\ [])
+
+  def retract(claim_id, opts) when is_binary(claim_id) do
+    with {:ok, workspace_id} <- require_workspace_id(opts),
+         {:ok, claim} <- load_persisted_claim(workspace_id, claim_id, opts[:tenant_id]) do
+      retract_persisted(claim, opts)
+    end
+  end
+
+  def retract(%Claim{} = claim, opts) do
+    with {:ok, persisted} <- reload_claim(claim) do
+      retract_persisted(persisted, opts)
+    end
+  end
+
+  def retract(claim, opts) when is_map(claim), do: retract(Claim.new(claim), opts)
+
   defp promote_persisted(%Claim{} = claim, opts) do
     with :ok <- require_source_lineage(claim),
          {:ok, review} <- ScoringPolicy.review_decision(claim, opts) do
@@ -170,6 +216,197 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
       end)
     end
   end
+
+  defp retract_persisted(%Claim{} = claim, opts) do
+    reviewer = string_or_nil(Keyword.get(opts, :verifier_id) || Keyword.get(opts, :actor_id))
+    reason = trimmed_reason(Keyword.get(opts, :reason))
+
+    cond do
+      is_nil(reviewer) -> {:error, :reviewer_required}
+      is_nil(reason) -> {:error, :reason_required}
+      claim.lifecycle_state != "promoted" -> {:error, :claim_not_promoted}
+      true -> do_retract(claim, reviewer, reason, opts)
+    end
+  end
+
+  defp do_retract(%Claim{} = claim, reviewer, reason, opts) do
+    now = timestamp()
+    claim_ref = ref("claim", claim.id)
+
+    EngineStore.transaction(fn txn ->
+      # De claim eerst: die UPDATE hertoetst `lifecycle_state = 'promoted'`,
+      # dus een tweede intrekking valt hier om vóór er ook maar één feit
+      # aangeraakt is.
+      with :ok <- Store.retract_claim(claim.workspace_id, claim.id, txn),
+           {:ok, fact_ids} <- txn_retract_facts(txn, claim, reviewer, reason, now),
+           ledger =
+             DerivationLedgerEntry.new(
+               "memory_core.retract_claim",
+               "claim_review",
+               [claim_ref],
+               [claim_ref | Enum.map(fact_ids, &ref("fact", &1))],
+               tenant_id: claim.tenant_id,
+               workspace_id: claim.workspace_id,
+               source_package_links: source_refs(claim),
+               evidence_links: [claim_ref],
+               actor_id: Keyword.get(opts, :actor_id),
+               evaluator_id: reviewer,
+               scoring_policy_version: ScoringPolicy.version(),
+               access_policy_id: claim.access_policy_id,
+               security_labels: claim.security_labels,
+               partition_ids: claim.partition_ids,
+               metadata: %{
+                 review_basis: "actor_retraction",
+                 reason: reason,
+                 retracted_fact_ids: fact_ids
+               }
+             ),
+           :ok <- txn_insert_derivation_entry(txn, ledger) do
+        {:ok,
+         %{
+           claim: Claim.new(%{claim | lifecycle_state: "retracted", review_status: "retracted"}),
+           fact_ids: fact_ids
+         }}
+      end
+    end)
+  end
+
+  # Elk GELDEND feit dat deze claim in zijn lineage draagt. De LIKE is de
+  # goedkope voorselectie in SQL; de echte toets is lidmaatschap van de
+  # gedecodeerde lijst, want een LIKE op een id-fragment matcht ook een id dat
+  # het toevallig bevat.
+  defp txn_retract_facts(txn, %Claim{} = claim, reviewer, reason, now) do
+    select_sql = """
+    SELECT id, accepted_claim_ids, metadata, valid_time_end
+    FROM facts
+    WHERE workspace_id = ?1 AND tenant_id = ?2
+      AND transaction_time_end IS NULL AND accepted_claim_ids LIKE ?3
+    """
+
+    with {:ok, rows} <-
+           EngineStore.txn_query(txn, select_sql, [
+             claim.workspace_id,
+             claim.tenant_id,
+             "%#{claim.id}%"
+           ]) do
+      rows
+      |> Enum.filter(fn [_id, accepted, _metadata, _valid_time_end] ->
+        claim.id in decode_list(accepted)
+      end)
+      |> Enum.reduce_while({:ok, []}, fn [fact_id, _accepted, metadata, valid_time_end],
+                                         {:ok, acc} ->
+        case txn_retract_fact(
+               txn,
+               claim,
+               fact_id,
+               decode_map(metadata),
+               valid_time_end,
+               reviewer,
+               reason,
+               now
+             ) do
+          :ok -> {:cont, {:ok, [fact_id | acc]}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, fact_ids} -> {:ok, Enum.reverse(fact_ids)}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  # De rij wordt GESLOTEN, niet gewist: tekst en lineage blijven staan, de
+  # bitemporele transactietijd eindigt en de reden reist mee in de metadata.
+  # De UPDATE hertoetst de open transactietijd, zodat een al gesloten versie
+  # nooit een tweede einde krijgt.
+  defp txn_retract_fact(
+         txn,
+         %Claim{} = claim,
+         fact_id,
+         metadata,
+         valid_time_end,
+         reviewer,
+         reason,
+         now
+       ) do
+    retracted_metadata =
+      Map.put(metadata, "retraction", %{
+        "reason" => reason,
+        "by" => reviewer,
+        "at" => now,
+        "claim_id" => claim.id
+      })
+
+    sql = """
+    UPDATE facts
+    SET lifecycle_state = 'retracted',
+        valid_time_end = ?3,
+        transaction_time_end = ?4,
+        metadata = ?5,
+        updated_at = datetime('now')
+    WHERE workspace_id = ?1 AND id = ?2 AND transaction_time_end IS NULL
+    """
+
+    with {:ok, _changes} <-
+           EngineStore.txn_execute(txn, sql, [
+             claim.workspace_id,
+             fact_id,
+             valid_time_end || now,
+             now,
+             JSON.map(retracted_metadata)
+           ]),
+         {:ok, _memory_ids} <- txn_retract_memory_objects(txn, claim, fact_id, now) do
+      :ok
+    end
+  end
+
+  # Zelfde greep als bij supersessie, met een eigen woord: retrieval filtert op
+  # `supersession_status = 'none'`, dus hiermee stopt ook de RAG-kant met het
+  # serveren van een ingetrokken feit.
+  defp txn_retract_memory_objects(txn, %Claim{} = claim, fact_id, now) do
+    select_sql = """
+    SELECT id, fact_links
+    FROM memory_objects
+    WHERE workspace_id = ?1 AND tenant_id = ?2
+      AND supersession_status = 'none' AND fact_links LIKE ?3
+    """
+
+    update_sql = """
+    UPDATE memory_objects
+    SET supersession_status = 'retracted',
+        lifecycle_state = 'retracted',
+        staleness_status = 'stale',
+        transaction_time_end = ?3,
+        updated_at = datetime('now')
+    WHERE workspace_id = ?1 AND id = ?2 AND supersession_status = 'none'
+    """
+
+    with {:ok, rows} <-
+           EngineStore.txn_query(txn, select_sql, [
+             claim.workspace_id,
+             claim.tenant_id,
+             "%#{fact_id}%"
+           ]) do
+      rows
+      |> Enum.filter(fn [_id, fact_links] -> links_include?(fact_links, fact_id) end)
+      |> Enum.reduce_while({:ok, []}, fn [memory_id, _links], {:ok, acc} ->
+        case EngineStore.txn_execute(txn, update_sql, [claim.workspace_id, memory_id, now]) do
+          {:ok, _changes} -> {:cont, {:ok, [memory_id | acc]}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp trimmed_reason(reason) when is_binary(reason) do
+    case String.trim(reason) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp trimmed_reason(_reason), do: nil
 
   defp do_promote(%Claim{} = claim, review, opts) do
     now = timestamp()
