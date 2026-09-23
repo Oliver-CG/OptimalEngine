@@ -28,6 +28,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.Insight.Health, as: HealthDiagnostics
   alias OptimalEngine.Graph.Reflector, as: Reflector
   alias OptimalEngine.MemoryCore.ContextPackage
+  alias OptimalEngine.MemoryCore.FactMerger
   alias OptimalEngine.MemoryCore.FactReviser
   alias OptimalEngine.MemoryCore.Store, as: FactStore
   alias OptimalEngine.Profile
@@ -2714,6 +2715,91 @@ defmodule OptimalEngine.API.Router do
                 send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
             end
         end
+    end
+  end
+
+  # POST /api/memory-core/facts/merge: voeg twee of meer geldende feiten
+  # samen tot één nieuw feit.
+  # Query: workspace, droog? (1/true: toon alleen wat er zou gebeuren)
+  # Body:  {fact_ids: [≥2 ids], fact_text, reason}
+  #
+  # Waarom (Nikki, 23-09): de feiten zijn veel en lijken op elkaar; de schil
+  # krijgt een knop "Voeg samen" die deze route aanroept. Elk oud feit wordt
+  # superseded door het nieuwe, met dezelfde keten als een herziening (PATCH
+  # hierboven): `superseded_by` op de oude rij, `supersedes` op de nieuwe.
+  # De schil verhuist de bevestigingen van de zaak langs die keten (U9), dus
+  # een Klopt op een van de oude feiten landt op het samengevoegde.
+  #
+  # De reden is verplicht (400 reason_required, net als intrekken): hij blijft
+  # op de oude rijen, op de nieuwe rij en in het derivation-ledger. De actor
+  # is de geauthenticeerde principal, nooit een naam uit de body (zelfde regel
+  # als de PATCH; de actor-sweep bewaakt hem). Zie FactMerger voor wat het
+  # nieuwe feit van de oude erft.
+  post "/api/memory-core/facts/merge" do
+    body = conn.body_params || %{}
+
+    workspace_id =
+      query_param(conn, "workspace", nil) || Map.get(body, "workspace") || "default"
+
+    dry_run = truthy?(query_param(conn, "droog", nil)) == true
+
+    case FactMerger.merge(workspace_id, Map.get(body, "fact_ids"), Map.get(body, "fact_text"),
+           reason: Map.get(body, "reason"),
+           actor_id: authenticated_actor(conn) || "api",
+           dry_run: dry_run
+         ) do
+      {:ok, %{fact: fact, old_facts: old_facts}} ->
+        json(conn, %{
+          workspace_id: workspace_id,
+          droog: dry_run,
+          fact: stringify_keys(fact),
+          old_facts:
+            Enum.map(old_facts, fn old ->
+              %{
+                id: old.id,
+                fact_text: old.fact_text,
+                lifecycle_state: "superseded",
+                superseded_by: fact.id
+              }
+            end)
+        })
+
+      {:error, :too_few_facts} ->
+        send_resp(
+          conn,
+          400,
+          Jason.encode!(%{error: "fact_ids must list at least two distinct fact ids"})
+        )
+
+      {:error, :blank_fact_text} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "fact_text must be a non-empty string"}))
+
+      {:error, :reason_required} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "reason_required"}))
+
+      {:error, {:fact_not_found, fact_id}} ->
+        send_resp(conn, 404, Jason.encode!(%{error: "not_found", fact_id: fact_id}))
+
+      {:error, {:fact_not_current, old}} ->
+        send_resp(
+          conn,
+          409,
+          Jason.encode!(%{
+            error: "fact is not current; merge its current version instead",
+            fact_id: old.id,
+            superseded_by: old.superseded_by
+          })
+        )
+
+      {:error, :scope_mismatch} ->
+        send_resp(
+          conn,
+          422,
+          Jason.encode!(%{error: "facts differ in tenant or access policy; they cannot be one fact"})
+        )
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 

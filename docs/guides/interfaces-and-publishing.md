@@ -128,6 +128,7 @@ POST  /api/memory/remember
 POST  /api/memory-core/active-pools
 POST  /api/memory-core/active-pools/:id/observations
 POST  /api/memory-core/claims/:id/promote
+POST  /api/memory-core/facts/merge?workspace=:ws[&droog=1]   {fact_ids: [2+], fact_text, reason}
 PATCH /api/workspaces/:id/config
 ```
 

@@ -720,9 +720,12 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
   end
 
   # -- transactional inserts (mirror MemoryCore.Store SQL, but run through
-  # -- the opaque handle so the whole promote sequence is one transaction)
+  # -- the opaque handle so the whole promote sequence is one transaction).
+  # -- Public (not documented API) because FactMerger writes the same three
+  # -- rows inside its own transaction; one copy of the SQL, not two.
 
-  defp txn_insert_fact(txn, %Fact{} = fact) do
+  @doc false
+  def txn_insert_fact(txn, %Fact{} = fact) do
     sql = """
     INSERT OR IGNORE INTO facts (
       id, tenant_id, workspace_id, fact_text, fact_type, subject_anchor,
@@ -779,7 +782,8 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
     ])
   end
 
-  defp txn_insert_relationship_edge(txn, %RelationshipEdge{} = edge) do
+  @doc false
+  def txn_insert_relationship_edge(txn, %RelationshipEdge{} = edge) do
     sql = """
     INSERT OR IGNORE INTO relationship_edges (
       id, tenant_id, workspace_id, from_object_type, from_object_id,
@@ -820,7 +824,8 @@ defmodule OptimalEngine.MemoryCore.FactPromoter do
     ])
   end
 
-  defp txn_insert_derivation_entry(txn, %DerivationLedgerEntry{} = entry) do
+  @doc false
+  def txn_insert_derivation_entry(txn, %DerivationLedgerEntry{} = entry) do
     sql = """
     INSERT INTO derivation_ledger (
       id, tenant_id, workspace_id, activity_type, derivation_stage,
