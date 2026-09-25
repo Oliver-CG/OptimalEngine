@@ -301,6 +301,7 @@ defmodule OptimalEngine.API.RateLimitTest do
     defp stage(conn, stage, opts \\ []) do
       config =
         RateLimitPlug.init([stage: stage, default_capacity: 2, default_per_minute: 1] ++ opts)
+
       RateLimitPlug.call(conn, config)
     end
 
