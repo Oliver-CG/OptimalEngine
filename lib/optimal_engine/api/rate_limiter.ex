@@ -112,6 +112,26 @@ defmodule OptimalEngine.API.RateLimiter do
     end
   end
 
+  @doc """
+  True when the bucket `key` holds at least one token. Consumes nothing, so a
+  caller can refuse work up front and only charge the bucket afterwards.
+  """
+  @spec available?(term(), pos_integer(), pos_integer()) :: boolean()
+  def available?(key, capacity, refill_per_minute)
+      when is_integer(capacity) and capacity > 0 and
+             is_integer(refill_per_minute) and refill_per_minute > 0 do
+    ensure_table()
+
+    case :ets.lookup(@table, key) do
+      [] ->
+        true
+
+      [{^key, tokens, last_refill_at}] ->
+        elapsed_ms = System.monotonic_time(:millisecond) - last_refill_at
+        tokens + elapsed_ms * (refill_per_minute / 60_000.0) >= 1.0
+    end
+  end
+
   @doc "Delete all bucket state. Intended for tests only."
   @spec reset() :: :ok
   def reset do

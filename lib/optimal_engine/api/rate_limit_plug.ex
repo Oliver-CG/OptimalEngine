@@ -7,11 +7,25 @@ defmodule OptimalEngine.API.RateLimitPlug do
   1. `conn.assigns[:current_api_key].id` when an authenticated API key is present.
   2. The request's peer IP address as a string (anonymous fallback).
 
+  ## Stages
+
+  The key is only known after `AuthPlug`, so the router mounts this plug twice:
+
+  - `stage: :pre_auth` (before AuthPlug) — a request WITHOUT a token is charged
+    to its IP bucket. A request WITH a token is not charged here, but when its
+    IP has spent its budget of failed authentications (`authfail:<ip>`) it gets
+    429 before any bcrypt work; every 401 that follows is charged to that
+    budget. Anonymous and bad-token storms stay throttled.
+  - `stage: :post_auth` (after AuthPlug) — a request with a verified key is
+    charged to that key's own bucket. Keyless requests pass (already charged).
+  - `stage: :all` (default) — one bucket per request: key when assigned, else IP.
+
   ## Rate limit values
 
   Priority (highest → lowest):
 
-  1. `api_key.metadata["rate_limit_per_minute"]` — per-key override.
+  1. `api_key.metadata["rate_limit_per_minute"]` and
+     `api_key.metadata["rate_limit_burst"]` — per-key override, set at mint.
   2. `Workspace.Config.get_section(workspace_slug, :rate_limit)` — per-workspace config.
   3. Module default: 100 req/min, 200 burst capacity.
 
@@ -70,16 +84,18 @@ defmodule OptimalEngine.API.RateLimitPlug do
           :default_per_minute,
           Keyword.get(app_defaults, :default_per_minute, @default_per_minute)
         ),
-      exempt_paths: Keyword.get(opts, :exempt_paths, @default_exempt)
+      exempt_paths: Keyword.get(opts, :exempt_paths, @default_exempt),
+      stage: Keyword.get(opts, :stage, :all)
     }
   end
 
   @impl Plug
   def call(conn, config) do
-    if exempt?(conn, config.exempt_paths) do
-      conn
-    else
-      enforce(conn, config)
+    cond do
+      exempt?(conn, config.exempt_paths) -> conn
+      config.stage == :pre_auth -> pre_auth(conn, config)
+      config.stage == :post_auth -> post_auth(conn, config)
+      true -> enforce(conn, config)
     end
   end
 
@@ -89,6 +105,47 @@ defmodule OptimalEngine.API.RateLimitPlug do
     conn.request_path in exempt_paths
   end
 
+  defp pre_auth(conn, config) do
+    if carries_token?(conn) do
+      guard_failed_auth(conn, config)
+    else
+      enforce(conn, config)
+    end
+  end
+
+  defp post_auth(conn, config) do
+    if conn.assigns[:current_api_key], do: enforce(conn, config), else: conn
+  end
+
+  # A token-bearing request from an IP that already spent its failed-auth
+  # budget is refused before AuthPlug runs bcrypt; otherwise a 401 charges it.
+  defp guard_failed_auth(conn, config) do
+    bucket = "authfail:#{peer_ip(conn)}"
+    capacity = config.default_capacity
+    per_minute = config.default_per_minute
+
+    if RateLimiter.available?(bucket, capacity, per_minute) do
+      register_before_send(conn, fn
+        %{status: 401} = sent ->
+          RateLimiter.check(bucket, capacity, per_minute)
+          sent
+
+        sent ->
+          sent
+      end)
+    else
+      case RateLimiter.check(bucket, capacity, per_minute) do
+        :ok -> conn
+        limited -> reject(conn, capacity, limited)
+      end
+    end
+  end
+
+  defp carries_token?(conn) do
+    match?(["Bearer " <> _ | _], get_req_header(conn, "authorization")) or
+      Enum.any?(get_req_header(conn, "x-api-key"), &(&1 != ""))
+  end
+
   defp enforce(conn, config) do
     {bucket_key, capacity, per_minute} = resolve_bucket(conn, config)
 
@@ -96,15 +153,19 @@ defmodule OptimalEngine.API.RateLimitPlug do
       :ok ->
         put_success_headers(conn, capacity, per_minute)
 
-      {:rate_limited, retry_after_ms, remaining: 0, reset_at: reset_at} ->
-        conn
-        |> put_resp_header("retry-after", to_string(div(retry_after_ms, 1_000) + 1))
-        |> put_resp_header("x-ratelimit-limit", to_string(capacity))
-        |> put_resp_header("x-ratelimit-remaining", "0")
-        |> put_resp_header("x-ratelimit-reset", monotonic_to_unix(reset_at))
-        |> send_resp(429, Jason.encode!(%{error: "rate_limited", retry_after_ms: retry_after_ms}))
-        |> halt()
+      limited ->
+        reject(conn, capacity, limited)
     end
+  end
+
+  defp reject(conn, capacity, {:rate_limited, retry_after_ms, remaining: 0, reset_at: reset_at}) do
+    conn
+    |> put_resp_header("retry-after", to_string(div(retry_after_ms, 1_000) + 1))
+    |> put_resp_header("x-ratelimit-limit", to_string(capacity))
+    |> put_resp_header("x-ratelimit-remaining", "0")
+    |> put_resp_header("x-ratelimit-reset", monotonic_to_unix(reset_at))
+    |> send_resp(429, Jason.encode!(%{error: "rate_limited", retry_after_ms: retry_after_ms}))
+    |> halt()
   end
 
   # Returns `{bucket_key, capacity, per_minute}`.
@@ -124,11 +185,12 @@ defmodule OptimalEngine.API.RateLimitPlug do
 
   defp resolve_limits(api_key, config) do
     # 1. Per-key metadata override.
-    key_limit = api_key && get_in(api_key, [Access.key(:metadata, %{}), "rate_limit_per_minute"])
+    key_rpm = key_metadata(api_key, "rate_limit_per_minute")
+    key_burst = key_metadata(api_key, "rate_limit_burst")
 
-    if is_integer(key_limit) and key_limit > 0 do
-      # Per-key override — use it with the default capacity.
-      {config.default_capacity, key_limit}
+    if key_rpm || key_burst do
+      # Per-key override — whichever half is unset falls back to the default.
+      {key_burst || config.default_capacity, key_rpm || config.default_per_minute}
     else
       # 2. Workspace config (best-effort, no workspace slug available at plug
       #    level so we fall through to defaults if it can't be determined).
@@ -141,12 +203,23 @@ defmodule OptimalEngine.API.RateLimitPlug do
     end
   end
 
+  defp key_metadata(nil, _field), do: nil
+
+  defp key_metadata(api_key, field) do
+    case Map.get(api_key, :metadata) do
+      %{^field => value} when is_integer(value) and value > 0 -> value
+      _ -> nil
+    end
+  end
+
   # Attempt to read workspace rate-limit config from the API key's workspace
   # assignment. Returns `{capacity, per_minute}` or `nil`.
   defp fetch_workspace_limit(nil), do: nil
 
   defp fetch_workspace_limit(api_key) do
-    workspace_slug = api_key[:workspace_slug] || api_key[:workspace_id]
+    # Map.get, not api_key[...]: the verified key is an %ApiKey{} struct, which
+    # does not implement Access, and bracket access on it raises.
+    workspace_slug = Map.get(api_key, :workspace_slug) || Map.get(api_key, :workspace_id)
 
     if is_binary(workspace_slug) and workspace_slug != "" do
       case WorkspaceConfig.get_section(workspace_slug, :rate_limit, nil) do

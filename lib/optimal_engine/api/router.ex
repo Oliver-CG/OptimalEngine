@@ -47,13 +47,23 @@ defmodule OptimalEngine.API.Router do
   plug(:match)
   plug(Plug.Parsers, parsers: [:json], json_decoder: Jason, pass: ["application/json"])
 
+  # Rate limiting straddles AuthPlug: before it, keyless requests are charged
+  # per IP and bad-token storms are cut off; after it, each verified key has
+  # its own bucket. Every client (hub, ronde, schil) talks from one address, so
+  # a single IP bucket let one key's burst stall all the others.
   plug(OptimalEngine.API.RateLimitPlug,
+    stage: :pre_auth,
     exempt_paths: ["/api/status", "/api/health", "/api/metrics/prometheus"]
   )
 
   # /api/health stays keyless so the container HEALTHCHECK (bare wget) keeps
   # working when auth_required is on; everything else needs a key.
   plug(OptimalEngine.API.AuthPlug, exempt_paths: ["/api/health"])
+
+  plug(OptimalEngine.API.RateLimitPlug,
+    stage: :post_auth,
+    exempt_paths: ["/api/status", "/api/health", "/api/metrics/prometheus"]
+  )
 
   # Workspace authorization — must run after AuthPlug (needs :current_tenant /
   # :current_api_key) and before :dispatch. Resolves the requested workspace

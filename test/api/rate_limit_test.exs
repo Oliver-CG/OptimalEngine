@@ -291,4 +291,67 @@ defmodule OptimalEngine.API.RateLimitTest do
       assert met_sleutel(b).status == 200
     end
   end
+
+  describe "stages rond AuthPlug" do
+    setup do
+      RateLimiter.reset()
+      :ok
+    end
+
+    defp stage(conn, stage, opts \\ []) do
+      config =
+        RateLimitPlug.init([stage: stage, default_capacity: 2, default_per_minute: 1] ++ opts)
+      RateLimitPlug.call(conn, config)
+    end
+
+    defp van(ip) do
+      put_peer_data(conn(:get, "/api/stores"), %{address: ip, port: 0, ssl_cert: nil})
+    end
+
+    test "pre_auth remt een anonieme storm per IP" do
+      for _ <- 1..2, do: refute(stage(van({10, 0, 0, 1}), :pre_auth).halted)
+
+      assert stage(van({10, 0, 0, 1}), :pre_auth).status == 429
+      refute stage(van({10, 0, 0, 2}), :pre_auth).halted
+    end
+
+    test "pre_auth rekent een verzoek met sleutel niet aan de IP-emmer" do
+      for _ <- 1..5 do
+        conn = van({10, 0, 0, 3}) |> put_req_header("authorization", "Bearer oe_x_y")
+        refute stage(conn, :pre_auth).halted
+      end
+    end
+
+    test "pre_auth weigert een IP dat zijn budget aan foute sleutels op heeft" do
+      fout = fn ->
+        van({10, 0, 0, 4})
+        |> put_req_header("x-api-key", "oe_fout_fout")
+        |> stage(:pre_auth)
+      end
+
+      for _ <- 1..2 do
+        conn = fout.()
+        refute conn.halted
+        send_resp(conn, 401, "")
+      end
+
+      assert fout.().status == 429
+    end
+
+    test "post_auth laat een verzoek zonder sleutel door" do
+      conn = van({10, 0, 0, 5}) |> assign(:current_api_key, nil)
+      for _ <- 1..5, do: refute(stage(conn, :post_auth).halted)
+    end
+
+    test "post_auth leest de grens van een echte %ApiKey{} zonder te crashen" do
+      key = %OptimalEngine.Auth.ApiKey{
+        id: "struct_#{System.unique_integer([:positive])}",
+        metadata: %{"rate_limit_burst" => 1}
+      }
+
+      conn = van({10, 0, 0, 6}) |> assign(:current_api_key, key)
+      refute stage(conn, :post_auth, default_capacity: 50).halted
+      assert stage(conn, :post_auth, default_capacity: 50).status == 429
+    end
+  end
 end
