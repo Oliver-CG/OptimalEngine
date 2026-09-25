@@ -239,4 +239,56 @@ defmodule OptimalEngine.API.RateLimitTest do
       assert conn.status != 429
     end
   end
+
+  # ── Een eigen emmer per sleutel (F3, 25-09) ─────────────────────────────────
+  #
+  # De hub, de ronde en de schil praten allemaal vanaf hetzelfde adres. Zolang
+  # de limiter vóór de auth draait emmert hij per IP, dus een meting met één
+  # sleutel houdt de live keten op. Deze toets loopt door de echte Router met
+  # auth aan en twee echte sleutels vanaf één peer-adres.
+
+  describe "een eigen emmer per sleutel (router, auth aan)" do
+    setup do
+      RateLimiter.reset()
+      original = Application.get_env(:optimal_engine, :auth, [])
+
+      Application.put_env(
+        :optimal_engine,
+        :auth,
+        Keyword.merge(original, auth_required: true, bcrypt_cost: 4)
+      )
+
+      on_exit(fn -> Application.put_env(:optimal_engine, :auth, original) end)
+      :ok
+    end
+
+    defp sleutel(burst) do
+      {:ok, %{key: token}} =
+        OptimalEngine.Auth.ApiKey.mint(%{
+          tenant_id: "default",
+          name: "emmer-toets-#{System.unique_integer([:positive])}",
+          scopes: ["read"],
+          metadata: %{"rate_limit_per_minute" => 1, "rate_limit_burst" => burst}
+        })
+
+      token
+    end
+
+    defp met_sleutel(token) do
+      conn(:get, "/api/stores")
+      |> put_peer_data(%{address: {10, 9, 8, 7}, port: 0, ssl_cert: nil})
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> Router.call(@router_opts)
+    end
+
+    test "een burst op sleutel A geeft 429 op A terwijl B 200 blijft" do
+      a = sleutel(3)
+      b = sleutel(3)
+
+      for _ <- 1..3, do: assert(met_sleutel(a).status == 200)
+
+      assert met_sleutel(a).status == 429
+      assert met_sleutel(b).status == 200
+    end
+  end
 end
