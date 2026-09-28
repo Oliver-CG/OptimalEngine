@@ -61,6 +61,8 @@ defmodule OptimalEngine.Application do
       OptimalEngine.Memory.Store.ETS,
       {DynamicSupervisor, name: OptimalEngine.Memory.SessionSupervisor, strategy: :one_for_one},
       {Task.Supervisor, name: OptimalEngine.Memory.EmbeddingTaskSupervisor},
+      # Vectoren van de geldende feiten (ETS); indexeert bij opstart en periodiek.
+      OptimalEngine.MemoryCore.FactVectors,
       OptimalEngine.Memory.Cortex,
       OptimalEngine.Memory.Learning,
       OptimalEngine.Memory.Surfacer,

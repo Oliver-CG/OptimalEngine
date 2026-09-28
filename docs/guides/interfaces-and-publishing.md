@@ -118,6 +118,7 @@ GET  /api/wiki
 GET  /api/wiki/:slug
 GET  /api/memory-core/claims
 GET  /api/memory-core/active-pools/:id
+POST /api/memory-core/facts/search   {workspace, q, limit?}   (leest alleen; de vraag wordt niet opgeslagen)
 ```
 
 Example app writes:
@@ -129,6 +130,7 @@ POST  /api/memory-core/active-pools
 POST  /api/memory-core/active-pools/:id/observations
 POST  /api/memory-core/claims/:id/promote
 POST  /api/memory-core/facts/merge?workspace=:ws[&droog=1]   {fact_ids: [2+], fact_text, reason}
+POST  /api/memory-core/reindex   {workspace}   (vectoren van alle geldende feiten en memories opnieuw)
 PATCH /api/workspaces/:id/config
 ```
 

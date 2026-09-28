@@ -35,5 +35,6 @@ config :optimal_engine, :context_refresh_scheduler,
 # Dedicated model integration tests call the adapters explicitly.
 config :optimal_engine, :hybrid_search, vector_enabled: false
 config :optimal_engine, :memory_embeddings, auto_index: false
+config :optimal_engine, :fact_search, warm: false
 config :optimal_engine, :embed, on_ingest: false
 config :optimal_engine, :semantic_processing, enabled: false

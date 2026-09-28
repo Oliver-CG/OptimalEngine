@@ -30,6 +30,7 @@ defmodule OptimalEngine.API.Router do
   alias OptimalEngine.MemoryCore.ContextPackage
   alias OptimalEngine.MemoryCore.FactMerger
   alias OptimalEngine.MemoryCore.FactReviser
+  alias OptimalEngine.MemoryCore.FactSearch
   alias OptimalEngine.MemoryCore.Store, as: FactStore
   alias OptimalEngine.Profile
   alias OptimalEngine.MemoryCore
@@ -2810,6 +2811,49 @@ defmodule OptimalEngine.API.Router do
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/facts/search: zoek in de gekeurde, geldende feiten,
+  # op betekenis én op woorden (zie FactSearch).
+  # Body: {workspace?, q, limit?}
+  # Antwoord: {workspace_id, mode: "hybrid" | "fts", results: [{id, fact_text, tak, score}]}
+  #
+  # Waarom (gemeten 27-09): search en rag zochten in memories en claimbronnen,
+  # niet in de feiten die de zaak keurt. POST en geen GET, want een gastvraag
+  # hoort niet in een querystring die een proxy of accesslog bewaart; de vraag
+  # wordt ook in de engine nergens weggeschreven. Is de embedder weg, dan zoekt
+  # de route op woorden alleen (mode "fts") in plaats van te falen.
+  post "/api/memory-core/facts/search" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", "default")
+
+    case FactSearch.search(workspace_id, Map.get(body, "q"),
+           tenant_id: conn.assigns[:current_tenant] || "default",
+           limit: parse_int(body["limit"], 10)
+         ) do
+      {:ok, %{mode: mode, results: results}} ->
+        json(conn, %{workspace_id: workspace_id, mode: mode, results: results})
+
+      {:error, :empty_query} ->
+        send_resp(conn, 400, Jason.encode!(%{error: "q must be a non-empty string"}))
+
+      {:error, reason} ->
+        send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # POST /api/memory-core/reindex: bouw de vectoren van een werkruimte opnieuw,
+  # van elk geldend feit en elke actuele memory. Body: {workspace?}
+  # Voor na een uitrol of modelwissel; nieuwe feiten krijgen hun vector ook
+  # vanzelf (FactVectors indexeert bij opstart en periodiek wat ontbreekt).
+  post "/api/memory-core/reindex" do
+    body = conn.body_params || %{}
+    workspace_id = Map.get(body, "workspace", "default")
+
+    case FactSearch.reindex(workspace_id, tenant_id: conn.assigns[:current_tenant] || "default") do
+      {:ok, summary} -> json(conn, summary)
+      {:error, reason} -> send_resp(conn, 422, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
