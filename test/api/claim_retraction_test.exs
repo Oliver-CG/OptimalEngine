@@ -97,7 +97,8 @@ defmodule OptimalEngine.API.ClaimRetractionTest do
       OptimalEngine.Auth.ApiKey.mint(%{
         tenant_id: "default",
         name: "retract-test-#{System.unique_integer([:positive])}",
-        principal_id: principal_id
+        principal_id: principal_id,
+        scopes: ["*"]
       })
 
     token

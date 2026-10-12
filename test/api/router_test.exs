@@ -36,7 +36,8 @@ defmodule OptimalEngine.API.RouterTest do
       OptimalEngine.Auth.ApiKey.mint(%{
         tenant_id: "default",
         name: "router-test #{principal_id}",
-        principal_id: principal_id
+        principal_id: principal_id,
+        scopes: ["*"]
       })
 
     token

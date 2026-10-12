@@ -76,7 +76,8 @@ defmodule OptimalEngine.API.FactRevisionTest do
     OptimalEngine.Auth.ApiKey.mint(%{
       tenant_id: "default",
       name: "revision-test",
-      principal_id: "user:revision-tester"
+      principal_id: "user:revision-tester",
+      scopes: ["*"]
     })
   end
 

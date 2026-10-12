@@ -192,6 +192,7 @@ defmodule OptimalEngine.API.WorkspaceAuthorizationTest do
           ApiKey.mint(%{
             tenant_id: "default",
             name: "scoped key #{ctx.suffix}",
+            scopes: ["*"],
             workspace_scope: [ctx.eng_ws]
           })
 
@@ -211,6 +212,7 @@ defmodule OptimalEngine.API.WorkspaceAuthorizationTest do
           ApiKey.mint(%{
             tenant_id: "default",
             name: "scoped key ok #{ctx.suffix}",
+            scopes: ["*"],
             workspace_scope: [ctx.eng_ws]
           })
 
@@ -230,6 +232,7 @@ defmodule OptimalEngine.API.WorkspaceAuthorizationTest do
           ApiKey.mint(%{
             tenant_id: ctx.foreign_tenant,
             name: "exampleorg wildcard #{ctx.suffix}",
+            scopes: ["*"],
             workspace_scope: ["*"]
           })
 
@@ -295,6 +298,7 @@ defmodule OptimalEngine.API.WorkspaceAuthorizationTest do
             tenant_id: "default",
             name: "rag grants #{ctx.suffix}",
             principal_id: "alice-#{ctx.suffix}",
+            scopes: ["*"],
             workspace_scope: ["*"],
             metadata: %{
               "allowed_partitions" => ["team-a"],

@@ -23,7 +23,8 @@ defmodule Mix.Tasks.Optimal.Auth do
     --tenant       <id>    Tenant/organization scope. Default: `default`.
     --name         <name>  Human label for a minted key. Required for `mint`.
     --principal    <id>    Optional principal/service-account id.
-    --scope        <s>     API scope. Repeatable. Default: `*`.
+    --scope        <s>     API scope. Repeatable. Default: `read` (agent key);
+                           ask `admin` or `*` explicitly.
     --workspace    <id>    Workspace scope. Repeatable. Default: `*`.
     --expires-at   <iso>   Optional ISO-8601 expiry timestamp.
     --json                Print machine-readable JSON.
@@ -175,7 +176,7 @@ defmodule Mix.Tasks.Optimal.Auth do
       tenant_id: tenant_id,
       name: name,
       principal_id: Keyword.get(opts, :principal),
-      scopes: keep_values(opts, :scope, ["*"]),
+      scopes: keep_values(opts, :scope, ["read"]),
       workspace_scope: keep_values(opts, :workspace, ["*"]),
       expires_at: Keyword.get(opts, :expires_at)
     }

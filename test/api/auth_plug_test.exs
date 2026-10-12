@@ -292,7 +292,9 @@ defmodule OptimalEngine.API.AuthPlugTest do
 
     test "a wildcard key can mint keys" do
       with_auth_required(fn ->
-        {:ok, %{key: token}} = ApiKey.mint(%{tenant_id: @tenant_id, name: "admin sleutel"})
+        {:ok, %{key: token}} =
+          ApiKey.mint(%{tenant_id: @tenant_id, name: "admin sleutel", scopes: ["*"]})
+
         conn = call(:post, "/api/auth/keys", [{"x-api-key", token}], %{name: "nieuw"})
         assert conn.status == 201
       end)

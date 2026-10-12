@@ -42,7 +42,7 @@ defmodule OptimalEngine.Auth.ApiKey do
             principal_id: nil,
             prefix: nil,
             name: nil,
-            scopes: ["*"],
+            scopes: ["read"],
             workspace_scope: ["*"],
             expires_at: nil,
             created_at: nil,
@@ -61,7 +61,9 @@ defmodule OptimalEngine.Auth.ApiKey do
   - `tenant_id`       (required) — tenant this key belongs to
   - `name`            (required) — human label ("production server", "ci/cd")
   - `principal_id`    (optional) — link to a principal
-  - `scopes`          (optional) — list of scope strings, default `["*"]`
+  - `scopes`          (optional) — list of scope strings, default `["read"]`
+                        (an agent key; `admin` or `*` must be asked for explicitly,
+                        L1.9b — anything that is not a list is `["read"]` too)
   - `workspace_scope` (optional) — list of workspace ids, default `["*"]`
   - `expires_at`      (optional) — ISO-8601 string or nil
   - `metadata`        (optional) — arbitrary map
@@ -80,7 +82,7 @@ defmodule OptimalEngine.Auth.ApiKey do
     hashed = Bcrypt.hash_pwd_salt(secret, log_rounds: bcrypt_cost())
 
     principal_id = get_attr(attrs, :principal_id)
-    scopes = get_attr(attrs, :scopes, ["*"])
+    scopes = scopes_of(get_attr(attrs, :scopes))
     workspace_scope = get_attr(attrs, :workspace_scope, ["*"])
     expires_at = get_attr(attrs, :expires_at)
     metadata = get_attr(attrs, :metadata, %{})
@@ -299,7 +301,7 @@ defmodule OptimalEngine.Auth.ApiKey do
       principal_id: principal_id,
       prefix: prefix,
       name: name,
-      scopes: decode_json_list(scopes_json, ["*"]),
+      scopes: decode_json_list(scopes_json, ["read"]),
       workspace_scope: decode_json_list(ws_scope_json, ["*"]),
       expires_at: expires_at,
       created_at: created_at,
@@ -331,7 +333,7 @@ defmodule OptimalEngine.Auth.ApiKey do
       principal_id: principal_id,
       prefix: prefix,
       name: name,
-      scopes: decode_json_list(scopes_json, ["*"]),
+      scopes: decode_json_list(scopes_json, ["read"]),
       workspace_scope: decode_json_list(ws_scope_json, ["*"]),
       expires_at: expires_at,
       created_at: created_at,
@@ -368,6 +370,16 @@ defmodule OptimalEngine.Auth.ApiKey do
     Map.get(attrs, key) || Map.get(attrs, to_string(key)) ||
       raise ArgumentError, "ApiKey.mint/1 requires #{inspect(key)}"
   end
+
+  # Fail-closed (L1.9b): without scopes, or with scopes that are not a list of
+  # strings, a key is an agent key. Before, a key minted without scopes was
+  # "*", and `"admin"` as a bare string was stored as JSON text that decoded
+  # back to the "*" default.
+  defp scopes_of(scopes) when is_list(scopes) and scopes != [] do
+    if Enum.all?(scopes, &is_binary/1), do: scopes, else: ["read"]
+  end
+
+  defp scopes_of(_), do: ["read"]
 
   defp get_attr(attrs, key, default \\ nil) do
     Map.get(attrs, key, Map.get(attrs, to_string(key), default))

@@ -122,7 +122,8 @@ defmodule OptimalEngine.API.FactSearchTest do
       OptimalEngine.Auth.ApiKey.mint(%{
         tenant_id: "default",
         name: "zoek-test-#{System.unique_integer([:positive])}",
-        principal_id: principal_id
+        principal_id: principal_id,
+        scopes: ["*"]
       })
 
     token
