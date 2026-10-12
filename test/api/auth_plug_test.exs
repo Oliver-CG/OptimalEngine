@@ -284,7 +284,9 @@ defmodule OptimalEngine.API.AuthPlugTest do
 
         conn = call(:post, "/api/auth/keys", [{"x-api-key", token}], %{name: "escalatie"})
         assert conn.status == 403
-        assert {:ok, %{"error" => "admin_scope_required"}} = Jason.decode(conn.resp_body)
+        # De sleutelgrens (L1.9) weigert een leessleutel vóór de route; de
+        # admin-toets in de route blijft de tweede lijn.
+        assert {:ok, %{"error" => "alleen_gekeurde_feiten"}} = Jason.decode(conn.resp_body)
       end)
     end
 

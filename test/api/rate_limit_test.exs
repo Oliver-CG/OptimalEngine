@@ -274,8 +274,10 @@ defmodule OptimalEngine.API.RateLimitTest do
       token
     end
 
+    # Een route die een leessleutel mag (de sleutelgrens, L1.9, weigert hem
+    # elders met 403 en dan meet de toets de grens in plaats van de emmer).
     defp met_sleutel(token) do
-      conn(:get, "/api/stores")
+      conn(:get, "/api/memory-core/facts")
       |> put_peer_data(%{address: {10, 9, 8, 7}, port: 0, ssl_cert: nil})
       |> put_req_header("authorization", "Bearer " <> token)
       |> Router.call(@router_opts)
