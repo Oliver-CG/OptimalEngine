@@ -19,8 +19,9 @@ defmodule OptimalEngine.API.SleutelgrensPlug do
   * **agentsleutel** (al het andere, zoals de leessleutels uit
     `deploy/mint_read_keys.exs`): alleen gekeurde, geldende feiten. De
     feitenlijst krijgt `lifecycle_state=accepted` en `current_only=1`
-    opgelegd; de keurlijst alleen met `review_status=approved`. Al het andere:
-    403 `alleen_gekeurde_feiten`.
+    opgelegd; de keurlijst alleen met `review_status=approved`, en de route
+    geeft dan per claim alleen de huidige tekst van het geldende feit (zie
+    `claim-review` in de router). Al het andere: 403 `alleen_gekeurde_feiten`.
 
   Zonder sleutel (alleen mogelijk met `auth_required: false`, de dev-stand)
   geldt geen rol, net als bij `admin_scope?/1` in de router.
@@ -41,7 +42,9 @@ defmodule OptimalEngine.API.SleutelgrensPlug do
       :geen -> conn
       :beheer -> conn
       :werk -> werk(conn)
-      :agent -> agent(conn)
+      # De rol gaat mee naar de route: `claim-review` geeft een agent alleen de
+      # tekst van het geldende feit (L1.9b).
+      :agent -> conn |> assign(:sleutelrol, :agent) |> agent()
     end
   end
 

@@ -2303,7 +2303,12 @@ defmodule OptimalEngine.API.Router do
       ]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
+    agent? = conn.assigns[:sleutelrol] == :agent
+
     case MemoryCore.claim_review_queue(opts) do
+      {:ok, queue} when agent? ->
+        goedgekeurd_voor_agent(conn, queue, workspace_id, tenant_id)
+
       {:ok, queue} ->
         json(conn, %{
           tenant_id: queue.tenant_id,
@@ -2317,6 +2322,53 @@ defmodule OptimalEngine.API.Router do
 
       {:error, reason} ->
         send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
+    end
+  end
+
+  # Een agentsleutel (L1.9b) krijgt van een goedgekeurde claim niet de claimrij:
+  # die draagt de tekst zoals hij geplaatst was, ook als het huis hem bij het
+  # keuren herschreef of het feit later verving. Hij krijgt per claim alleen de
+  # huidige tekst van het geldende feit dat hem draagt (accepted, open
+  # transactietijd, niet verlopen; via `accepted_claim_ids`, die herzien en
+  # samenvoegen meenemen). Een claim zonder geldend feit valt weg. De
+  # wachtrijtellingen gaan niet mee.
+  defp goedgekeurd_voor_agent(conn, queue, workspace_id, tenant_id) do
+    with {:ok, geldend} <- FactSearch.current_facts(workspace_id, tenant_id: tenant_id),
+         {:ok, facts} <-
+           MemoryCore.list_facts(workspace_id,
+             tenant_id: tenant_id,
+             lifecycle_state: "accepted",
+             open_transaction_only: true
+           ) do
+      geldige_ids = MapSet.new(geldend, & &1.id)
+
+      per_claim =
+        for fact <- facts,
+            MapSet.member?(geldige_ids, fact.id),
+            claim_id <- fact.accepted_claim_ids || [],
+            into: %{},
+            do: {claim_id, fact}
+
+      claims =
+        for claim <- queue.claims,
+            fact = Map.get(per_claim, Map.get(claim, :id) || Map.get(claim, "id")),
+            do: %{
+              id: Map.get(claim, :id) || Map.get(claim, "id"),
+              review_status: "approved",
+              fact_id: fact.id,
+              fact_text: fact.fact_text,
+              claim_text: fact.fact_text
+            }
+
+      json(conn, %{
+        tenant_id: tenant_id,
+        workspace_id: workspace_id,
+        count: length(claims),
+        returned: length(claims),
+        claims: claims
+      })
+    else
+      {:error, reason} -> send_resp(conn, 500, Jason.encode!(%{error: inspect(reason)}))
     end
   end
 
