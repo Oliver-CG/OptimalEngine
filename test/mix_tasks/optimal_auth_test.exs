@@ -46,6 +46,20 @@ defmodule Mix.Tasks.Optimal.AuthTest do
     assert verified.id == id
   end
 
+  # L1.9b: zonder --scope is een sleutel een agentsleutel; beheer vraag je expliciet.
+  test "mint zonder --scope geeft een leessleutel" do
+    name = "cli zonder scope #{System.unique_integer([:positive])}"
+
+    output =
+      capture_io(fn ->
+        Mix.Tasks.Optimal.Auth.run(["mint", "--name", name, "--json"])
+      end)
+
+    assert {:ok, %{"key" => key}} = Jason.decode(output)
+    assert {:ok, verified} = ApiKey.verify(key)
+    assert verified.scopes == ["read"]
+  end
+
   test "list shows minted key without secret" do
     name = "cli list #{System.unique_integer([:positive])}"
     {:ok, %{id: id, key: key}} = ApiKey.mint(%{tenant_id: @tenant_id, name: name})

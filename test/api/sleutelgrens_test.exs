@@ -296,4 +296,112 @@ defmodule OptimalEngine.API.SleutelgrensTest do
       assert Jason.decode!(conn.resp_body)["error"] == "beheersleutel_vereist"
     end
   end
+
+  # L1.9b (verse toets 13-10): de goedgekeurde-claimroute gaf een agent de
+  # claimtekst zoals hij geplaatst was, ook als het huis hem bij het keuren
+  # herschreef of het feit later verving.
+  describe "goedgekeurde claims voor een agent" do
+    test "een agent krijgt de huidige tekst van het geldende feit, niet de claimtekst", ctx do
+      oud = "ongekeurd" <> uniek()
+      herschreven = "herschreven" <> uniek()
+      vervangen = "vervangen" <> uniek()
+      nieuw = "nieuw" <> uniek()
+
+      {claim1, _} = plaats(ctx.ws, oud, ctx.sleutels.werk)
+
+      assert vraag(:post, "/api/memory-core/claims/#{claim1["id"]}/promote", ctx.sleutels.keur, %{
+               "workspace" => ctx.ws,
+               "fact_text" => "De serre kost per groep codewoord #{herschreven}"
+             }).status == 200
+
+      {claim2, _} = plaats(ctx.ws, vervangen, ctx.sleutels.werk)
+      keur(ctx.ws, claim2, vervangen, ctx.sleutels.keur)
+
+      feiten =
+        vraag(
+          :get,
+          "/api/memory-core/facts?workspace=#{ctx.ws}&current_only=1",
+          ctx.sleutels.beheer
+        )
+
+      feit2 =
+        Jason.decode!(feiten.resp_body)["facts"]
+        |> Enum.find(&String.contains?(&1["fact_text"], vervangen))
+
+      assert vraag(
+               :patch,
+               "/api/memory-core/facts/#{feit2["id"]}?workspace=#{ctx.ws}",
+               ctx.sleutels.keur,
+               %{"fact_text" => "De serre is dicht, codewoord #{nieuw}", "reason" => "verbouwing"}
+             ).status == 200
+
+      conn =
+        vraag(
+          :get,
+          "/api/memory-core/claim-review?workspace=#{ctx.ws}&review_status=approved",
+          ctx.sleutels.lees
+        )
+
+      assert conn.status == 200
+      refute conn.resp_body =~ oud
+      refute conn.resp_body =~ vervangen
+      assert conn.resp_body =~ herschreven
+      assert conn.resp_body =~ nieuw
+
+      # Positieve controle: de werksleutel (keurpad) ziet de claimrij zelf nog.
+      werk =
+        vraag(
+          :get,
+          "/api/memory-core/claim-review?workspace=#{ctx.ws}&review_status=approved",
+          ctx.sleutels.werk
+        )
+
+      assert werk.resp_body =~ oud
+      assert werk.resp_body =~ vervangen
+    end
+  end
+
+  describe "standaardscope" do
+    test "een sleutel zonder scopes is een agentsleutel, geen beheersleutel" do
+      {:ok, %{key: token}} =
+        OptimalEngine.Auth.ApiKey.mint(%{tenant_id: "default", name: "zonder-scopes-#{uniek()}"})
+
+      assert {:ok, key} = OptimalEngine.Auth.ApiKey.verify(token)
+      assert key.scopes == ["read"]
+      assert vraag(:get, "/api/search?q=iets", token).status == 403
+    end
+
+    test "scopes die geen lijst zijn, worden geen beheer" do
+      {:ok, %{key: token}} =
+        OptimalEngine.Auth.ApiKey.mint(%{
+          tenant_id: "default",
+          name: "rare-scopes-#{uniek()}",
+          scopes: "admin"
+        })
+
+      assert {:ok, key} = OptimalEngine.Auth.ApiKey.verify(token)
+      assert key.scopes == ["read"]
+    end
+
+    test "POST /api/auth/keys zonder scopes mint een agentsleutel", ctx do
+      conn = vraag(:post, "/api/auth/keys", ctx.sleutels.beheer, %{"name" => "via-api-#{uniek()}"})
+      assert conn.status == 201
+      %{"key" => token} = Jason.decode!(conn.resp_body)
+
+      assert {:ok, key} = OptimalEngine.Auth.ApiKey.verify(token)
+      assert key.scopes == ["read"]
+    end
+
+    test "een beheersleutel is expliciet te vragen" do
+      {:ok, %{key: token}} =
+        OptimalEngine.Auth.ApiKey.mint(%{
+          tenant_id: "default",
+          name: "beheer-#{uniek()}",
+          scopes: ["admin"]
+        })
+
+      assert {:ok, key} = OptimalEngine.Auth.ApiKey.verify(token)
+      assert key.scopes == ["admin"]
+    end
+  end
 end
