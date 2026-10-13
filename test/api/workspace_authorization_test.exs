@@ -71,6 +71,9 @@ defmodule OptimalEngine.API.WorkspaceAuthorizationTest do
   end
 
   setup do
+    # Anonieme verzoeken delen de emmer van één IP met de hele suite; zonder
+    # reset hangt deze module af van wie er vóór draaide (seed 367032 gaf 429).
+    OptimalEngine.API.RateLimiter.reset()
     suffix = System.unique_integer([:positive])
 
     # A foreign tenant with one registered workspace.
